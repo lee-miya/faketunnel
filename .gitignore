@@ -19,6 +19,7 @@ configs/local/
 
 # 编辑器 / 代理记忆
 .cursor/
+cursor/
 AGENTS.md
 .idea/
 .vscode/
