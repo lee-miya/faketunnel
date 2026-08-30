@@ -30,6 +30,9 @@ type Server struct {
 	tunnelLn net.Listener
 	public   map[string]net.Listener
 	httpL    []*httpListener
+	udpPC    map[string]net.PacketConn
+	udpMu    sync.Mutex
+	udpHubs  map[string]*udpHub
 	sem      chan struct{}
 	wg       sync.WaitGroup
 }
@@ -74,9 +77,9 @@ func (s *Server) Start(ctx context.Context) error {
 
 	for _, t := range s.cfg.Tunnels {
 		switch t.Type {
-		case config.TypeTCP, config.TypeHTTP:
+		case config.TypeTCP, config.TypeHTTP, config.TypeUDP:
 		default:
-			s.log.Warn("skipping tunnel (not implemented yet)", "name", t.Name, "type", t.Type)
+			s.log.Warn("skipping tunnel (unknown type)", "name", t.Name, "type", t.Type)
 		}
 	}
 	for _, t := range s.cfg.TCPTunnels() {
@@ -95,6 +98,9 @@ func (s *Server) Start(ctx context.Context) error {
 		})
 	}
 	if err := s.startHTTP(ctx); err != nil {
+		return err
+	}
+	if err := s.startUDP(ctx); err != nil {
 		return err
 	}
 
@@ -118,6 +124,7 @@ func (s *Server) Run(ctx context.Context) error {
 // Shutdown stops listeners, closes the agent session, and drains handlers.
 func (s *Server) Shutdown() error {
 	s.shutdownHTTP()
+	s.closeUDPHubs()
 	_ = s.closeListeners()
 	s.mu.Lock()
 	sess := s.sess
@@ -152,6 +159,11 @@ func (s *Server) closeListeners() error {
 			first = err
 		}
 	}
+	for _, pc := range s.udpPC {
+		if err := pc.Close(); err != nil && first == nil {
+			first = err
+		}
+	}
 	return first
 }
 
@@ -163,16 +175,19 @@ func (s *Server) TunnelAddr() string {
 	return s.tunnelLn.Addr().String()
 }
 
-// PublicAddr is the bound public address for a named tunnel.
+// PublicAddr is the bound public address for a named tunnel (TCP/HTTP/UDP).
 func (s *Server) PublicAddr(name string) string {
-	ln := s.public[name]
-	if ln == nil {
-		return ""
+	if ln := s.public[name]; ln != nil {
+		return ln.Addr().String()
 	}
-	return ln.Addr().String()
+	if pc := s.udpPC[name]; pc != nil {
+		return pc.LocalAddr().String()
+	}
+	return ""
 }
 
 func (s *Server) setSession(sess *tunnel.Session) {
+	s.closeUDPHubs()
 	s.mu.Lock()
 	old := s.sess
 	s.sess = sess
@@ -188,6 +203,7 @@ func (s *Server) setSession(sess *tunnel.Session) {
 			s.sess = nil
 		}
 		s.mu.Unlock()
+		s.closeUDPHubs()
 		s.log.Info("agent disconnected")
 	})
 }

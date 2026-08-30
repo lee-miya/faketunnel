@@ -149,3 +149,38 @@ func TestValidateEdgeHTTPHealthPath(t *testing.T) {
 	}
 }
 
+func TestValidateEdgeUDP(t *testing.T) {
+	t.Parallel()
+	cfg := &File{
+		Listen: ":8443",
+		Token:  "x",
+		TLS:    TLS{AutoSelfSigned: true},
+		Tunnels: []Tunnel{
+			{Name: "dns", Type: TypeUDP, Public: "127.0.0.1:5353", Local: "127.0.0.1:53"},
+		},
+	}
+	if err := cfg.ValidateEdge(); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.UDPTunnels()) != 1 {
+		t.Fatal("expected one udp tunnel")
+	}
+	cfg.Tunnels = append(cfg.Tunnels, Tunnel{
+		Name: "dup", Type: TypeUDP, Public: "127.0.0.1:5353", Local: "127.0.0.1:54",
+	})
+	if err := cfg.ValidateEdge(); err == nil {
+		t.Fatal("expected duplicate udp public error")
+	}
+}
+
+func TestUDPIdleDefault(t *testing.T) {
+	t.Parallel()
+	cfg := &File{}
+	if cfg.UDPIdleOrDefault() != 60*time.Second {
+		t.Fatalf("default=%s", cfg.UDPIdleOrDefault())
+	}
+	cfg.IdleTimeout = Duration(5 * time.Second)
+	if cfg.UDPIdleOrDefault() != 5*time.Second {
+		t.Fatalf("idle=%s", cfg.UDPIdleOrDefault())
+	}
+}

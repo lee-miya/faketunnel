@@ -206,6 +206,7 @@ func (c *File) ValidateEdge() error {
 		return fmt.Errorf("health_path must start with /")
 	}
 	publicTCP := make(map[string]struct{})
+	publicUDP := make(map[string]struct{})
 	for _, t := range c.Tunnels {
 		if t.Type != TypeTCP {
 			continue
@@ -217,6 +218,21 @@ func (c *File) ValidateEdge() error {
 			return fmt.Errorf("duplicate public listen %q", t.Public)
 		}
 		publicTCP[t.Public] = struct{}{}
+		if strings.TrimSpace(t.Local) == "" {
+			return fmt.Errorf("tunnel %q: local is required", t.Name)
+		}
+	}
+	for _, t := range c.Tunnels {
+		if t.Type != TypeUDP {
+			continue
+		}
+		if strings.TrimSpace(t.Public) == "" {
+			return fmt.Errorf("tunnel %q: public is required for udp", t.Name)
+		}
+		if _, ok := publicUDP[t.Public]; ok {
+			return fmt.Errorf("duplicate public udp listen %q", t.Public)
+		}
+		publicUDP[t.Public] = struct{}{}
 		if strings.TrimSpace(t.Local) == "" {
 			return fmt.Errorf("tunnel %q: local is required", t.Name)
 		}
@@ -288,7 +304,7 @@ func (c *File) ValidateAgent() error {
 	}
 	for _, t := range c.Tunnels {
 		switch t.Type {
-		case TypeTCP, TypeHTTP:
+		case TypeTCP, TypeHTTP, TypeUDP:
 			if strings.TrimSpace(t.Local) == "" {
 				return fmt.Errorf("tunnel %q: local is required", t.Name)
 			}
@@ -329,6 +345,17 @@ func (c *File) HTTPTunnels() []Tunnel {
 	return out
 }
 
+// UDPTunnels returns UDP mappings only.
+func (c *File) UDPTunnels() []Tunnel {
+	var out []Tunnel
+	for _, t := range c.Tunnels {
+		if t.Type == TypeUDP {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
 // HealthPathOrDefault returns the optional Edge health-check path (empty = disabled).
 func (c *File) HealthPathOrDefault() string {
 	return strings.TrimSpace(c.HealthPath)
@@ -345,6 +372,15 @@ func (c *File) PrivateOnly() bool {
 // IdleOrDefault is the TCP idle timeout (0 = none).
 func (c *File) IdleOrDefault() time.Duration {
 	return c.IdleTimeout.Duration()
+}
+
+// UDPIdleOrDefault is the UDP association idle timeout.
+// Uses idle_timeout when set; otherwise defaults to 60s (UDP always needs a TTL).
+func (c *File) UDPIdleOrDefault() time.Duration {
+	if d := c.IdleTimeout.Duration(); d > 0 {
+		return d
+	}
+	return 60 * time.Second
 }
 
 // DialOrDefault is the local/agent dial timeout.

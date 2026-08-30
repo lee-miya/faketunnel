@@ -132,6 +132,10 @@ func (c *Client) acceptLoop(ctx context.Context, sess *tunnel.Session) error {
 }
 
 func (c *Client) handleStream(stream net.Conn, meta tunnel.OpenMeta) {
+	if meta.Proto == tunnel.ProtoUDP {
+		c.handleUDPStream(stream, meta)
+		return
+	}
 	defer stream.Close()
 	tun, ok := c.cfg.TunnelByName(meta.Name)
 	if !ok {

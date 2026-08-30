@@ -14,5 +14,8 @@ tunnels:
   - name: web-tls
     type: http
     local: "127.0.0.1:3000"
+  - name: dns-demo
+    type: udp
+    local: "127.0.0.1:9053"
 log_level: info
 # local_private_only: true

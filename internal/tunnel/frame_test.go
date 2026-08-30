@@ -97,6 +97,50 @@ func TestAuthOpenPingCodec(t *testing.T) {
 	if err != nil || n != nsec {
 		t.Fatalf("ping %d %v", n, err)
 	}
+
+	oa := OpenAssoc{ID: 42, ClientAddr: "203.0.113.10:9"}
+	b, err = oa.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	goa, err := ParseOpenAssoc(b)
+	if err != nil || goa != oa {
+		t.Fatalf("open assoc %v %v", goa, err)
+	}
+
+	oack := OpenAssocAck{ID: 42, OK: true, Message: "ok"}
+	b, err = oack.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	goack, err := ParseOpenAssocAck(b)
+	if err != nil || goack != oack {
+		t.Fatalf("assoc ack %v %v", goack, err)
+	}
+
+	dg := Datagram{ID: 7, Payload: []byte("udp-payload")}
+	b, err = dg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	gdg, err := ParseDatagram(b)
+	if err != nil || gdg.ID != dg.ID || string(gdg.Payload) != string(dg.Payload) {
+		t.Fatalf("datagram %v %v", gdg, err)
+	}
+
+	ca := CloseAssoc{ID: 7}
+	b, err = ca.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	gca, err := ParseCloseAssoc(b)
+	if err != nil || gca != ca {
+		t.Fatalf("close assoc %v %v", gca, err)
+	}
+
+	if _, err := (Datagram{ID: 1, Payload: make([]byte, MaxDatagramPayload+1)}).Marshal(); err == nil {
+		t.Fatal("expected datagram too large")
+	}
 }
 
 func TestParseTruncated(t *testing.T) {

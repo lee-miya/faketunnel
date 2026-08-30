@@ -24,6 +24,10 @@ const (
 	TypePing
 	TypePong
 	TypeConfigPush
+	TypeOpenAssoc
+	TypeOpenAssocAck
+	TypeDatagram
+	TypeCloseAssoc
 )
 
 func (t Type) String() string {
@@ -44,10 +48,25 @@ func (t Type) String() string {
 		return "Pong"
 	case TypeConfigPush:
 		return "ConfigPush"
+	case TypeOpenAssoc:
+		return "OpenAssoc"
+	case TypeOpenAssocAck:
+		return "OpenAssocAck"
+	case TypeDatagram:
+		return "Datagram"
+	case TypeCloseAssoc:
+		return "CloseAssoc"
 	default:
 		return fmt.Sprintf("Type(%d)", t)
 	}
 }
+
+// AssocIDSize is the on-wire size of a UDP association id.
+const AssocIDSize = 4
+
+// MaxDatagramPayload is the max UDP payload bytes in a Datagram frame
+// (assoc id consumes AssocIDSize of MaxPayloadSize).
+const MaxDatagramPayload = MaxPayloadSize - AssocIDSize
 
 const (
 	ProtoTCP  uint8 = 1
@@ -294,4 +313,132 @@ func PingPayload(nsec int64) []byte {
 func ParsePing(p []byte) (int64, error) {
 	n, err := getU64(p)
 	return int64(n), err
+}
+
+func putU32(n uint32) []byte {
+	var b [4]byte
+	binary.BigEndian.PutUint32(b[:], n)
+	return b[:]
+}
+
+func getU32(p []byte) (uint32, []byte, error) {
+	if len(p) < 4 {
+		return 0, nil, fmt.Errorf("truncated u32")
+	}
+	return binary.BigEndian.Uint32(p[:4]), p[4:], nil
+}
+
+// OpenAssoc opens a UDP association on a ProtoUDP yamux stream.
+type OpenAssoc struct {
+	ID         uint32
+	ClientAddr string
+}
+
+func (o OpenAssoc) Marshal() ([]byte, error) {
+	buf := putU32(o.ID)
+	return putString(buf, o.ClientAddr)
+}
+
+func ParseOpenAssoc(p []byte) (OpenAssoc, error) {
+	var o OpenAssoc
+	id, rest, err := getU32(p)
+	if err != nil {
+		return o, err
+	}
+	o.ID = id
+	s, rest, err := getString(rest)
+	if err != nil {
+		return o, err
+	}
+	o.ClientAddr = s
+	if len(rest) != 0 {
+		return o, fmt.Errorf("trailing bytes")
+	}
+	return o, nil
+}
+
+// OpenAssocAck is the agent reply to OpenAssoc.
+type OpenAssocAck struct {
+	ID      uint32
+	OK      bool
+	Message string
+}
+
+func (a OpenAssocAck) Marshal() ([]byte, error) {
+	buf := putU32(a.ID)
+	ok := byte(0)
+	if a.OK {
+		ok = 1
+	}
+	buf = append(buf, ok)
+	return putString(buf, a.Message)
+}
+
+func ParseOpenAssocAck(p []byte) (OpenAssocAck, error) {
+	var a OpenAssocAck
+	id, rest, err := getU32(p)
+	if err != nil {
+		return a, err
+	}
+	a.ID = id
+	if len(rest) < 1 {
+		return a, fmt.Errorf("truncated assoc ack")
+	}
+	a.OK = rest[0] == 1
+	s, rest, err := getString(rest[1:])
+	if err != nil {
+		return a, err
+	}
+	a.Message = s
+	if len(rest) != 0 {
+		return a, fmt.Errorf("trailing bytes")
+	}
+	return a, nil
+}
+
+// Datagram carries one UDP payload for an association.
+type Datagram struct {
+	ID      uint32
+	Payload []byte
+}
+
+func (d Datagram) Marshal() ([]byte, error) {
+	if len(d.Payload) > MaxDatagramPayload {
+		return nil, fmt.Errorf("datagram too large: %d", len(d.Payload))
+	}
+	buf := putU32(d.ID)
+	return append(buf, d.Payload...), nil
+}
+
+func ParseDatagram(p []byte) (Datagram, error) {
+	var d Datagram
+	id, rest, err := getU32(p)
+	if err != nil {
+		return d, err
+	}
+	d.ID = id
+	d.Payload = rest
+	return d, nil
+}
+
+// CloseAssoc tears down a UDP association.
+type CloseAssoc struct {
+	ID uint32
+}
+
+func (c CloseAssoc) Marshal() ([]byte, error) {
+	return putU32(c.ID), nil
+}
+
+func ParseCloseAssoc(p []byte) (CloseAssoc, error) {
+	var c CloseAssoc
+	id, rest, err := getU32(p)
+	if err != nil {
+		return c, err
+	}
+	c.ID = id
+	if len(rest) != 0 {
+		return c, fmt.Errorf("trailing bytes")
+	}
+	return c, nil
 }

@@ -23,6 +23,10 @@ tunnels:
     tls: true
     host: "secure.localhost"
     local: "127.0.0.1:3000"
+  - name: dns-demo
+    type: udp
+    public: "127.0.0.1:5353"
+    local: "127.0.0.1:9053"
 log_level: info
 # idle_timeout: 5m
 # max_sessions: 1024
