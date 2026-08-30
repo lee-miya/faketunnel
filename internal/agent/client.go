@@ -155,7 +155,7 @@ func (c *Client) handleStream(stream net.Conn, meta tunnel.OpenMeta) {
 	if err := tunnel.AckData(stream, true, "ok"); err != nil {
 		return
 	}
-	c.log.Info("tcp forwarded", "tunnel", meta.Name, "local", local, "client", meta.ClientAddr)
+	c.log.Info("stream forwarded", "tunnel", meta.Name, "proto", meta.Proto, "local", local, "client", meta.ClientAddr)
 	if err := proxy.Relay(stream, conn, c.cfg.IdleOrDefault()); err != nil {
 		c.log.Debug("relay end", "tunnel", meta.Name, "err", err)
 	}

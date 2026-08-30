@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,6 +39,7 @@ type File struct {
 	LogFormat        string   `yaml:"log_format"`
 	ProxyProtocol    bool     `yaml:"proxy_protocol"`
 	LocalPrivateOnly *bool    `yaml:"local_private_only"`
+	HealthPath       string   `yaml:"health_path"`
 }
 
 // TLS holds certificate settings for the tunnel.
@@ -55,8 +57,11 @@ type Tunnel struct {
 	Name   string `yaml:"name"`
 	Type   string `yaml:"type"`
 	Public string `yaml:"public"`
-	TLS    bool   `yaml:"tls"`
+	TLS    bool   `yaml:"tls"` // when type=http: terminate TLS on Edge (HTTPS)
 	Local  string `yaml:"local"`
+	Host   string `yaml:"host"` // HTTP Host / TLS SNI; empty = catch-all on that public
+	Cert   string `yaml:"cert"` // optional per-tunnel HTTPS cert (relative to config dir)
+	Key    string `yaml:"key"`
 }
 
 // Duration wraps time.Duration for YAML strings like "5m".
@@ -124,6 +129,10 @@ func (c *File) resolvePaths(base string) {
 	c.TLS.Cert = resolve(base, c.TLS.Cert)
 	c.TLS.Key = resolve(base, c.TLS.Key)
 	c.TLS.CA = resolve(base, c.TLS.CA)
+	for i := range c.Tunnels {
+		c.Tunnels[i].Cert = resolve(base, c.Tunnels[i].Cert)
+		c.Tunnels[i].Key = resolve(base, c.Tunnels[i].Key)
+	}
 }
 
 func resolve(base, p string) string {
@@ -193,7 +202,10 @@ func (c *File) ValidateEdge() error {
 	if !c.TLS.AutoSelfSigned && (c.TLS.Cert == "" || c.TLS.Key == "") {
 		return fmt.Errorf("tls.cert and tls.key are required (or set tls.auto_self_signed)")
 	}
-	publics := make(map[string]struct{})
+	if hp := strings.TrimSpace(c.HealthPath); hp != "" && !strings.HasPrefix(hp, "/") {
+		return fmt.Errorf("health_path must start with /")
+	}
+	publicTCP := make(map[string]struct{})
 	for _, t := range c.Tunnels {
 		if t.Type != TypeTCP {
 			continue
@@ -201,15 +213,69 @@ func (c *File) ValidateEdge() error {
 		if strings.TrimSpace(t.Public) == "" {
 			return fmt.Errorf("tunnel %q: public is required for tcp", t.Name)
 		}
-		if _, ok := publics[t.Public]; ok {
+		if _, ok := publicTCP[t.Public]; ok {
 			return fmt.Errorf("duplicate public listen %q", t.Public)
 		}
-		publics[t.Public] = struct{}{}
+		publicTCP[t.Public] = struct{}{}
 		if strings.TrimSpace(t.Local) == "" {
 			return fmt.Errorf("tunnel %q: local is required", t.Name)
 		}
 	}
+	type httpGroupMeta struct {
+		tls   bool
+		hosts map[string]string // normalized host -> tunnel name; "" = catch-all
+	}
+	httpGroups := make(map[string]*httpGroupMeta)
+	for _, t := range c.Tunnels {
+		if t.Type != TypeHTTP {
+			continue
+		}
+		if strings.TrimSpace(t.Public) == "" {
+			return fmt.Errorf("tunnel %q: public is required for http", t.Name)
+		}
+		if strings.TrimSpace(t.Local) == "" {
+			return fmt.Errorf("tunnel %q: local is required", t.Name)
+		}
+		if _, ok := publicTCP[t.Public]; ok {
+			return fmt.Errorf("public listen %q used by both tcp and http", t.Public)
+		}
+		if t.TLS {
+			hasPair := (t.Cert != "" && t.Key != "") || (c.TLS.Cert != "" && c.TLS.Key != "") || c.TLS.AutoSelfSigned
+			if !hasPair {
+				return fmt.Errorf("tunnel %q: https requires cert/key (tunnel or edge tls) or tls.auto_self_signed", t.Name)
+			}
+			if (t.Cert == "") != (t.Key == "") {
+				return fmt.Errorf("tunnel %q: cert and key must both be set", t.Name)
+			}
+		}
+		g, ok := httpGroups[t.Public]
+		if !ok {
+			g = &httpGroupMeta{tls: t.TLS, hosts: make(map[string]string)}
+			httpGroups[t.Public] = g
+		} else if g.tls != t.TLS {
+			return fmt.Errorf("public listen %q mixes tls and non-tls http tunnels", t.Public)
+		}
+		hostKey := normalizeConfigHost(t.Host)
+		if _, dup := g.hosts[hostKey]; dup {
+			if hostKey == "" {
+				return fmt.Errorf("duplicate catch-all http tunnel on %q", t.Public)
+			}
+			return fmt.Errorf("duplicate http host %q on %q", hostKey, t.Public)
+		}
+		g.hosts[hostKey] = t.Name
+	}
 	return nil
+}
+
+func normalizeConfigHost(host string) string {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return ""
+	}
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		return strings.ToLower(h)
+	}
+	return strings.ToLower(host)
 }
 
 // ValidateAgent checks agent-specific fields.
@@ -221,11 +287,11 @@ func (c *File) ValidateAgent() error {
 		return fmt.Errorf("edge is required for agent")
 	}
 	for _, t := range c.Tunnels {
-		if t.Type != TypeTCP {
-			continue
-		}
-		if strings.TrimSpace(t.Local) == "" {
-			return fmt.Errorf("tunnel %q: local is required", t.Name)
+		switch t.Type {
+		case TypeTCP, TypeHTTP:
+			if strings.TrimSpace(t.Local) == "" {
+				return fmt.Errorf("tunnel %q: local is required", t.Name)
+			}
 		}
 	}
 	return nil
@@ -250,6 +316,22 @@ func (c *File) TCPTunnels() []Tunnel {
 		}
 	}
 	return out
+}
+
+// HTTPTunnels returns HTTP/HTTPS mappings only.
+func (c *File) HTTPTunnels() []Tunnel {
+	var out []Tunnel
+	for _, t := range c.Tunnels {
+		if t.Type == TypeHTTP {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// HealthPathOrDefault returns the optional Edge health-check path (empty = disabled).
+func (c *File) HealthPathOrDefault() string {
+	return strings.TrimSpace(c.HealthPath)
 }
 
 // PrivateOnly reports whether local dials must stay on loopback/RFC1918/ULA.

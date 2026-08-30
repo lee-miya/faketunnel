@@ -29,6 +29,7 @@ type Server struct {
 	sess     *tunnel.Session
 	tunnelLn net.Listener
 	public   map[string]net.Listener
+	httpL    []*httpListener
 	sem      chan struct{}
 	wg       sync.WaitGroup
 }
@@ -72,8 +73,10 @@ func (s *Server) Start(ctx context.Context) error {
 	s.log.Info("tunnel listen", "addr", ln.Addr().String())
 
 	for _, t := range s.cfg.Tunnels {
-		if t.Type != config.TypeTCP {
-			s.log.Warn("skipping tunnel (not implemented in phase 1)", "name", t.Name, "type", t.Type)
+		switch t.Type {
+		case config.TypeTCP, config.TypeHTTP:
+		default:
+			s.log.Warn("skipping tunnel (not implemented yet)", "name", t.Name, "type", t.Type)
 		}
 	}
 	for _, t := range s.cfg.TCPTunnels() {
@@ -90,6 +93,9 @@ func (s *Server) Start(ctx context.Context) error {
 			defer s.wg.Done()
 			s.servePublic(ctx, tun, pln)
 		})
+	}
+	if err := s.startHTTP(ctx); err != nil {
+		return err
 	}
 
 	s.wg.Add(1)
@@ -111,6 +117,7 @@ func (s *Server) Run(ctx context.Context) error {
 
 // Shutdown stops listeners, closes the agent session, and drains handlers.
 func (s *Server) Shutdown() error {
+	s.shutdownHTTP()
 	_ = s.closeListeners()
 	s.mu.Lock()
 	sess := s.sess

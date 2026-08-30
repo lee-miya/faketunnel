@@ -8,5 +8,11 @@ tunnels:
   - name: echo
     type: tcp
     local: "127.0.0.1:9000"
+  - name: web
+    type: http
+    local: "127.0.0.1:3000"
+  - name: web-tls
+    type: http
+    local: "127.0.0.1:3000"
 log_level: info
 # local_private_only: true

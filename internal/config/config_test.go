@@ -110,3 +110,42 @@ func TestValidateAgentRequiresEdge(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestValidateEdgeHTTPHostRouting(t *testing.T) {
+	t.Parallel()
+	cfg := &File{
+		Listen: ":8443",
+		Token:  "x",
+		TLS:    TLS{AutoSelfSigned: true},
+		Tunnels: []Tunnel{
+			{Name: "a", Type: TypeHTTP, Public: "127.0.0.1:8080", Host: "a.example", Local: "127.0.0.1:1"},
+			{Name: "b", Type: TypeHTTP, Public: "127.0.0.1:8080", Host: "b.example", Local: "127.0.0.1:2"},
+		},
+	}
+	if err := cfg.ValidateEdge(); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Tunnels = append(cfg.Tunnels, Tunnel{
+		Name: "dup", Type: TypeHTTP, Public: "127.0.0.1:8080", Host: "a.example", Local: "127.0.0.1:3",
+	})
+	if err := cfg.ValidateEdge(); err == nil {
+		t.Fatal("expected duplicate host error")
+	}
+}
+
+func TestValidateEdgeHTTPHealthPath(t *testing.T) {
+	t.Parallel()
+	cfg := &File{
+		Listen:     ":8443",
+		Token:      "x",
+		TLS:        TLS{AutoSelfSigned: true},
+		HealthPath: "healthz",
+		Tunnels: []Tunnel{
+			{Name: "web", Type: TypeHTTP, Public: "127.0.0.1:80", Local: "127.0.0.1:1"},
+		},
+	}
+	if err := cfg.ValidateEdge(); err == nil {
+		t.Fatal("expected health_path error")
+	}
+}
+

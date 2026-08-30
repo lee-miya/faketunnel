@@ -10,6 +10,18 @@ import (
 
 const maxProxyLine = 108
 
+// IPFromAddr parses a host:port or bare IP string into an IP.
+func IPFromAddr(addr string) net.IP {
+	if addr == "" {
+		return nil
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return net.ParseIP(addr)
+	}
+	return net.ParseIP(host)
+}
+
 // IPFromConn returns the remote IP, or nil if it cannot be parsed.
 func IPFromConn(c net.Conn) net.IP {
 	if c == nil {
@@ -22,11 +34,7 @@ func IPFromConn(c net.Conn) net.IP {
 	if addr == nil {
 		return nil
 	}
-	host, _, err := net.SplitHostPort(addr.String())
-	if err != nil {
-		return net.ParseIP(addr.String())
-	}
-	return net.ParseIP(host)
+	return IPFromAddr(addr.String())
 }
 
 // CloseReset closes c so a TCP peer typically sees RST (SO_LINGER 0).
