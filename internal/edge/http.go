@@ -27,6 +27,49 @@ type httpListener struct {
 	byName   map[string]config.Tunnel
 	certs    map[string]*tls.Certificate
 	fallback *tls.Certificate
+
+	mu    sync.Mutex
+	conns map[net.Conn]struct{}
+	srvs  map[*http.Server]struct{}
+}
+
+func (hl *httpListener) trackConn(c net.Conn, add bool) {
+	hl.mu.Lock()
+	defer hl.mu.Unlock()
+	if hl.conns == nil {
+		hl.conns = make(map[net.Conn]struct{})
+	}
+	if add {
+		hl.conns[c] = struct{}{}
+	} else {
+		delete(hl.conns, c)
+	}
+}
+
+func (hl *httpListener) trackServer(srv *http.Server, add bool) {
+	hl.mu.Lock()
+	defer hl.mu.Unlock()
+	if hl.srvs == nil {
+		hl.srvs = make(map[*http.Server]struct{})
+	}
+	if add {
+		hl.srvs[srv] = struct{}{}
+	} else {
+		delete(hl.srvs, srv)
+	}
+}
+
+func (hl *httpListener) closeAll() {
+	hl.mu.Lock()
+	defer hl.mu.Unlock()
+	for srv := range hl.srvs {
+		_ = srv.Close()
+	}
+	for c := range hl.conns {
+		_ = c.Close()
+	}
+	hl.srvs = nil
+	hl.conns = nil
 }
 
 func (s *Server) startHTTP(ctx context.Context) error {
@@ -165,9 +208,13 @@ func (s *Server) serveHTTP(ctx context.Context, hl *httpListener) {
 			s.log.Warn("proxy protocol", "err", err)
 			continue
 		}
+		hl.trackConn(conn, true)
 		s.wg.Add(1)
 		safe.Go(s.log, "http-conn", func() {
-			defer s.wg.Done()
+			defer func() {
+				hl.trackConn(conn, false)
+				s.wg.Done()
+			}()
 			s.handleHTTPConn(hl, conn)
 		})
 	}
@@ -177,13 +224,7 @@ func (s *Server) handleHTTPConn(hl *httpListener, conn net.Conn) {
 	defer func() { _ = conn.Close() }()
 
 	ip := netutil.IPFromConn(conn)
-	if !s.acl.Allow(ip) {
-		ipStr := ""
-		if ip != nil {
-			ipStr = ip.String()
-		}
-		s.reg.IncDeny()
-		s.log.Warn("acl deny", "ip", ipStr, "proto", "http")
+	if !s.publicAllowed(ip, "http", hl.public) {
 		if !hl.tls {
 			writeHTTPStatus(conn, http.StatusForbidden, "forbidden")
 		} else {
@@ -196,6 +237,7 @@ func (s *Server) handleHTTPConn(hl *httpListener, conn net.Conn) {
 
 	var sni string
 	alpn := ""
+	var tlsState *tls.ConnectionState
 	if hl.tls {
 		name, hello, err := proxy.PeekClientHello(conn)
 		if err != nil {
@@ -221,6 +263,7 @@ func (s *Server) handleHTTPConn(hl *httpListener, conn net.Conn) {
 		}
 		conn = tlsConn
 		cs := tlsConn.ConnectionState()
+		tlsState = &cs
 		if cs.ServerName != "" {
 			sni = cs.ServerName
 		}
@@ -254,23 +297,31 @@ func (s *Server) handleHTTPConn(hl *httpListener, conn net.Conn) {
 		return
 	}
 
-	s.serveHTTP1(hl, conn)
+	s.serveHTTP1(hl, conn, tlsState)
 }
 
-func (s *Server) serveHTTP1(hl *httpListener, conn net.Conn) {
+func (s *Server) serveHTTP1(hl *httpListener, conn net.Conn, tlsState *tls.ConnectionState) {
 	done := make(chan struct{})
-	var once sync.Once
-	closeDone := func() { once.Do(func() { close(done) }) }
-	ln := &singleConnListener{conn: conn, addr: conn.LocalAddr(), done: done}
+	var closeOnce sync.Once
+	closeDone := func() { closeOnce.Do(func() { close(done) }) }
+	ln := &singleConnListener{
+		conn:      conn,
+		addr:      conn.LocalAddr(),
+		done:      done,
+		closeDone: closeDone,
+	}
 	srv := &http.Server{
-		Handler:           s.http1Handler(hl),
+		Handler:           s.http1Handler(hl, tlsState),
 		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       s.cfg.IdleOrDefault(),
 		ConnState: func(_ net.Conn, st http.ConnState) {
 			if st == http.StateClosed || st == http.StateHijacked {
 				closeDone()
 			}
 		},
 	}
+	hl.trackServer(srv, true)
+	defer hl.trackServer(srv, false)
 	_ = srv.Serve(ln)
 	closeDone()
 }
@@ -344,7 +395,7 @@ func (s *Server) spliceHTTP(tun config.Tunnel, conn net.Conn, sni, path string, 
 	}
 }
 
-func (s *Server) http1Handler(hl *httpListener) http.Handler {
+func (s *Server) http1Handler(hl *httpListener, tlsState *tls.ConnectionState) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		health := s.cfg.HealthPathOrDefault()
 		if health != "" && r.URL.Path == health {
@@ -355,8 +406,8 @@ func (s *Server) http1Handler(hl *httpListener) http.Handler {
 		}
 
 		tun, ok := lookupHTTPTunnel(hl, r.Host)
-		if !ok && r.TLS != nil {
-			tun, ok = lookupHTTPTunnel(hl, r.TLS.ServerName)
+		if !ok && tlsState != nil {
+			tun, ok = lookupHTTPTunnel(hl, tlsState.ServerName)
 		}
 		if !ok {
 			http.Error(w, "no tunnel for host", http.StatusBadGateway)
@@ -389,7 +440,18 @@ func (s *Server) http1Handler(hl *httpListener) http.Handler {
 				if req.Host == "" {
 					req.Host = tun.Local
 				}
+				proto := "http"
+				if tlsState != nil {
+					proto = "https"
+				}
+				if req.Header.Get("X-Forwarded-Proto") == "" {
+					req.Header.Set("X-Forwarded-Proto", proto)
+				}
+				if req.Header.Get("X-Forwarded-Host") == "" && r.Host != "" {
+					req.Header.Set("X-Forwarded-Host", r.Host)
+				}
 			},
+			FlushInterval: 100 * time.Millisecond,
 			Transport: &http.Transport{
 				DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 					return sess.OpenData(tunnel.OpenMeta{
@@ -449,10 +511,11 @@ func writeHTTPStatus(w net.Conn, status int, body string) {
 }
 
 type singleConnListener struct {
-	conn net.Conn
-	addr net.Addr
-	done <-chan struct{}
-	once sync.Once
+	conn      net.Conn
+	addr      net.Addr
+	done      <-chan struct{}
+	closeDone func()
+	once      sync.Once
 }
 
 func (l *singleConnListener) Accept() (net.Conn, error) {
@@ -465,10 +528,17 @@ func (l *singleConnListener) Accept() (net.Conn, error) {
 	return nil, net.ErrClosed
 }
 
-func (l *singleConnListener) Close() error { return nil }
+func (l *singleConnListener) Close() error {
+	if l.closeDone != nil {
+		l.closeDone()
+	}
+	return l.conn.Close()
+}
 
 func (l *singleConnListener) Addr() net.Addr { return l.addr }
 
 func (s *Server) shutdownHTTP() {
-	// Accept loops stop when listeners close; in-flight splices drain via WaitGroup.
+	for _, hl := range s.httpL {
+		hl.closeAll()
+	}
 }

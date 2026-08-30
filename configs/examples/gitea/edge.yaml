@@ -1,0 +1,27 @@
+# Gitea 场景：跑在公网 VPS 上的 Edge。
+# 推荐用 `faketunnel init -preset gitea` 生成真实 token，不要直接把本文件上公网。
+#
+# 未写出的项使用默认值：
+#   listen: ":8443"
+#   tls：配置旁 certs/edge.crt（首次启动自签）
+#   admin.listen: 127.0.0.1:9090，token 写入 admin.token
+#   allowlist_file: 同目录 allowlist.json
+#
+# 不必写 name。省略时内部为 http-8080、tcp-2222，不会写回本文件。
+# 省略 host = 该端口 catch-all，浏览器用 VPS IP 访问即可。
+#
+# local 纯数字 = Agent 本机 127.0.0.1:该端口。
+# Agent 与 Gitea 不在同一台（同一内网）时改成：
+#   local: "192.168.1.50:3000"
+# 并把 Gitea HTTP_ADDR 改为听内网（不要对公网开放）。详见 docs/scenarios/gitea.md 第 5.2 节。
+
+token: "dev-token-change-me"
+admin:
+  token: "admin-dev-token-change-me"
+tunnels:
+  - type: http
+    public: 8080
+    local: 3000
+  # Gitea 内置 SSH。若只用 HTTP clone，可删掉本条。
+  - public: 2222
+    local: 2222

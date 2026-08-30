@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,7 +13,9 @@ import (
 	"time"
 
 	"faketunnel/internal/acl"
+	"faketunnel/internal/ban"
 	"faketunnel/internal/metrics"
+	"faketunnel/internal/netutil"
 )
 
 const maxBody = 1 << 20
@@ -22,6 +25,8 @@ type Config struct {
 	Listen  string
 	Token   string
 	Metrics bool
+	TLS     *tls.Config // nil = plaintext HTTP (loopback)
+	Bans    *ban.Store
 }
 
 // StatusFunc returns Edge runtime status for GET /v1/status.
@@ -61,13 +66,18 @@ func New(cfg Config, store *acl.Store, reg *metrics.Registry, status StatusFunc,
 	s := &Server{cfg: cfg, store: store, reg: reg, status: status, log: log}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/allowlist", s.handleAllowlist)
+	mux.HandleFunc("/v1/allowlist/self", s.handleAllowSelf)
+	mux.HandleFunc("/v1/denylist", s.handleDenylist)
 	mux.HandleFunc("/v1/status", s.handleStatus)
 	if cfg.Metrics {
-		mux.Handle("/metrics", reg.Handler())
+		mux.HandleFunc("/metrics", s.handleMetrics)
 	}
 	s.http = &http.Server{
 		Handler:           s.auth(mux),
 		ReadHeaderTimeout: 10 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 16,
 		ErrorLog:          slog.NewLogLogger(log.Handler(), slog.LevelDebug),
 	}
 	return s, nil
@@ -80,7 +90,13 @@ func (s *Server) Start() error {
 		return fmt.Errorf("admin listen %s: %w", s.cfg.Listen, err)
 	}
 	s.ln = ln
-	s.log.Info("admin listen", "addr", ln.Addr().String(), "metrics", s.cfg.Metrics)
+	scheme := "http"
+	if s.cfg.TLS != nil {
+		ln = tls.NewListener(ln, s.cfg.TLS)
+		s.ln = ln
+		scheme = "https"
+	}
+	s.log.Info("admin listen", "addr", ln.Addr().String(), "metrics", s.cfg.Metrics, "tls", s.cfg.TLS != nil, "scheme", scheme)
 	go func() {
 		if err := s.http.Serve(ln); err != nil && err != http.ErrServerClosed {
 			s.log.Debug("admin serve end", "err", err)
@@ -109,10 +125,17 @@ func (s *Server) Shutdown() error {
 
 func (s *Server) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// /metrics may be scraped without auth when metrics enabled — still require token
-		// for all admin routes including metrics (management port should stay private).
+		ip := netutil.IPFromAddr(r.RemoteAddr)
 		if !bearerOK(r.Header.Get("Authorization"), s.cfg.Token) {
+			if s.cfg.Bans != nil && s.cfg.Bans.Blocked(ip) {
+				s.log.Debug("admin blocked banned ip", "remote", r.RemoteAddr, "path", r.URL.Path)
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
 			s.log.Warn("admin auth failed", "remote", r.RemoteAddr, "path", r.URL.Path)
+			if s.cfg.Bans != nil {
+				s.cfg.Bans.ObserveInvalid(ip, "admin")
+			}
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -166,6 +189,7 @@ func (s *Server) handleAllowlist(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		s.unbanListed(body.CIDRs, actor)
 		writeJSON(w, http.StatusOK, allowlistDTO{CIDRs: s.store.Entries()})
 	case http.MethodPost:
 		body, err := readDTO(r)
@@ -185,6 +209,7 @@ func (s *Server) handleAllowlist(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		s.unbanListed(cidrs, actor)
 		writeJSON(w, http.StatusOK, allowlistDTO{CIDRs: s.store.Entries()})
 	case http.MethodDelete:
 		cidrs := append([]string(nil), r.URL.Query()["cidr"]...)
@@ -220,6 +245,94 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, s.status())
+}
+
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	_ = metrics.WriteStatus(w, s.status())
+}
+
+func (s *Server) handleAllowSelf(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	ip := netutil.IPFromAddr(r.RemoteAddr)
+	if ip == nil {
+		http.Error(w, "cannot parse client ip", http.StatusBadRequest)
+		return
+	}
+	cidr := ip.String() + "/32"
+	if ip.To4() == nil {
+		cidr = ip.String() + "/128"
+	}
+	actor := actorFrom(r)
+	if err := s.store.Add([]string{cidr}, actor); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.unbanListed([]string{cidr}, actor)
+	writeJSON(w, http.StatusOK, allowlistDTO{CIDRs: s.store.Entries(), CIDR: cidr})
+}
+
+func (s *Server) handleDenylist(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.Bans == nil {
+		http.Error(w, "denylist unavailable", http.StatusNotImplemented)
+		return
+	}
+	actor := actorFrom(r)
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, map[string]any{"entries": s.cfg.Bans.List()})
+	case http.MethodDelete:
+		ips := append([]string(nil), r.URL.Query()["ip"]...)
+		if r.Body != nil && r.ContentLength != 0 {
+			var body struct {
+				IPs []string `json:"ips"`
+				IP  string   `json:"ip"`
+			}
+			data, err := io.ReadAll(io.LimitReader(r.Body, maxBody))
+			if err == nil && len(strings.TrimSpace(string(data))) > 0 {
+				if err := json.Unmarshal(data, &body); err != nil {
+					http.Error(w, "json: "+err.Error(), http.StatusBadRequest)
+					return
+				}
+				ips = append(ips, body.IPs...)
+				if body.IP != "" {
+					ips = append(ips, body.IP)
+				}
+			}
+		}
+		if len(ips) == 0 {
+			http.Error(w, "ip query or body required", http.StatusBadRequest)
+			return
+		}
+		for _, raw := range ips {
+			ip := net.ParseIP(strings.TrimSpace(raw))
+			if ip == nil {
+				http.Error(w, "invalid ip "+raw, http.StatusBadRequest)
+				return
+			}
+			if err := s.cfg.Bans.Unban(ip, actor); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"entries": s.cfg.Bans.List()})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) unbanListed(cidrs []string, actor string) {
+	if s.cfg.Bans == nil {
+		return
+	}
+	s.cfg.Bans.UnbanCIDRs(cidrs, actor)
 }
 
 func readDTO(r *http.Request) (allowlistDTO, error) {

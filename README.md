@@ -1,167 +1,124 @@
 # fakeTunnel
 
-自托管隧道：在公网 VPS 上运行 **Edge**，本机运行 **Agent** 主动出站建连，把本地 TCP / HTTP / UDP 服务暴露到 VPS 端口。Edge 在转发前强制 **IP allowlist**（默认拒绝），并可通过 **Admin API / CLI** 热更新名单。
+**fakeTunnel** 是一个自托管、安全、轻量的反向代理与内网穿透隧道系统（Cloudflare Tunnel 风格）。
 
-当前实现为 **Phase 1–4**：TLS + token 隧道、yamux、TCP、HTTP/HTTPS（Host/SNI，连接级透传，含 HTTP/2 端到端）、UDP assoc/datagram、文件 allowlist、Admin 热更新、指标与运维 CLI。
+只需在公网 VPS 上运行 **Edge**，并在内网或源站运行 **Agent**（仅需向外发起出站 TLS 连接），即可安全地将内网 Web、SSH、Git、DNS 等 TCP / HTTP / UDP 服务发布到公网。
 
-## 构建
+---
 
-需要 Go 1.22+。
+## ✨ 核心特性
 
-```bash
-go test ./...
-go build -o bin/edge ./cmd/edge
-go build -o bin/agent ./cmd/agent
-go build -o bin/faketunnel ./cmd/faketunnel
+- **🔒 单向出站建连**：Agent 仅需出站发起 TLS 握手连接 Edge，内网无需公网 IP、动态域名或路由器端口映射。
+- **🛡️ 严格安全防护**：
+  - **IP Allowlist**：Edge 端口转发前强制执行 CIDR 白名单过滤（默认仅允许环回）。
+  - **主动防爆破与封禁**：非白名单连续扫描 5 次自动触发 6 小时临时封禁，二次触发永久封禁。
+  - **私网目标限制**：Agent 默认仅允许转发至内网与环回目标，防止内网横向越权。
+- **🌐 全协议穿透支持**：
+  - **TCP 端口转发**：支持 SSH、数据库、Git 等通用 TCP 协议。
+  - **HTTP / HTTPS 路由**：支持 Host / SNI 多路复用路由、HTTP/1.1 请求反代、HTTP/2 整连接透传及自签/外部证书。
+  - **UDP 穿透**：支持 DNS、游戏等 UDP 协议，内置会话关联与空闲超时管理。
+- **⚡ 热更新与可观测性**：
+  - 提供 **Admin API** 与 `faketunnel` CLI，支持无需重启服务的白名单热添加、删除与查询。
+  - 内置 Prometheus 标准指标（`/metrics`）与隧道 RTT 延迟探测。
+- **📦 零依赖与极简配置**：
+  - 单一纯 Go 静态编译二进制，无 CGO 依赖。
+  - 支持 `faketunnel init` 一键交互生成最小化生产配置。
+
+---
+
+## 🏗️ 架构概览
+
+```
+  [ 访问者 / 客户端 ]
+          │ (TCP / HTTP / UDP)
+          ▼
+   ┌──────────────┐
+   │  Edge 服务   │  (运行于公网 VPS，监听业务端口与 Admin API)
+   │ (IP 白名单)  │
+   └──────▲───────┘
+          │ (单向出站 TLS 隧道 / Yamux 多路复用)
+   ┌──────┴───────┐
+   │  Agent 客户端 │  (运行于内网 / 容器 / 虚拟机)
+   └──────┬───────┘
+          │ (本地或局域网转发)
+          ▼
+   [ 内网源站服务 (Web / SSH / Gitea / DB...) ]
 ```
 
-## 快速试用（本机回环）
+---
 
-1. 本地 TCP echo（任选其一）：
+## 🚀 快速上手
+
+### 1. 编译构建
+
+项目内置标准 `Makefile`，需要 Go 1.22+ 环境：
 
 ```bash
-ncat -e /bin/cat -k -l 127.0.0.1 9000
+# 编译所有程序至 bin/ 目录 (bin/edge, bin/agent, bin/faketunnel)
+make build
+
+# 运行测试套件
+make test
 ```
 
-或：
+> **交叉编译**：若开发机与 VPS 架构不同，可直接运行 `make cross-linux-amd64` 或 `make cross-all` 生成无依赖的静态二进制。
+
+### 2. 生成配置
+
+使用 `faketunnel init` 一键生成 Edge 与 Agent 的成套最小配置（自动生成高强度 Token 与证书）：
 
 ```bash
-python3 -c 'import socket,threading
-s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
-s.bind(("127.0.0.1",9000)); s.listen()
-while True:
-    c,_=s.accept()
-    threading.Thread(target=lambda c: (c.sendall(c.recv(65536)), c.close()), args=(c,), daemon=True).start()'
+# 在当前目录下生成 configs/edge.yaml 和 configs/agent.yaml
+./bin/faketunnel init -dir ./configs -edge <VPS_IP> -http 8080:3000 -tcp 2222
 ```
 
-2. （可选）本地 HTTP：
+### 3. 启动服务
 
 ```bash
-python3 -m http.server 3000 --bind 127.0.0.1
+# 1. 在 VPS 上启动 Edge
+./bin/edge -config configs/edge.yaml
+
+# 2. 在内网机器上启动 Agent
+./bin/agent -config configs/agent.yaml
 ```
 
-3. （可选）本地 UDP echo：
+---
+
+## 🛠️ 管理与常用命令
+
+`faketunnel` CLI 用于通过 Admin API 动态管理 Edge 运行状态：
 
 ```bash
-python3 -c 'import socket
-s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.bind(("127.0.0.1",9053))
-while True:
-    data,addr=s.recvfrom(65535); s.sendto(data,addr)'
-```
-
-4. 启动 Edge，再启动 Agent：
-
-```bash
-./bin/edge -config configs/examples/edge.yaml
-./bin/agent -config configs/examples/agent.yaml
-```
-
-首次启动会按配置生成自签证书（`configs/certs/`，已 gitignore）。
-
-5. 访问公网侧（示例 allowlist 仅允许 `127.0.0.1` / `::1`）：
-
-```bash
-printf 'hello' | ncat 127.0.0.1 2222
-curl -H 'Host: web.localhost' http://127.0.0.1:8080/
-curl -k --resolve secure.localhost:8444:127.0.0.1 https://secure.localhost:8444/
-curl -k --http2 --resolve h2.localhost:8445:127.0.0.1 https://h2.localhost:8445/
-curl http://127.0.0.1:8080/healthz
-printf 'hello-udp' | ncat -u 127.0.0.1 5354
-```
-
-未在 allowlist 中的 IP 会被拒绝（TCP 尽量 RST；HTTP 回 403；UDP 丢弃）。
-
-6. 热更新 allowlist（示例 Admin 口 `127.0.0.1:9090`）：
-
-```bash
-export FAKETUNNEL_TOKEN=admin-dev-token-change-me
-./bin/faketunnel allowlist list -admin http://127.0.0.1:9090
-./bin/faketunnel allowlist add -admin http://127.0.0.1:9090 203.0.113.10/32
+# 查看 Edge 运行状态与指标 (Agent 在线状态、会话数、RTT 等)
 ./bin/faketunnel status -admin http://127.0.0.1:9090
+
+# 查看当前 IP 白名单
+./bin/faketunnel allowlist list -admin http://127.0.0.1:9090
+
+# 动态添加访问 IP 到白名单（支持 CIDR）
+./bin/faketunnel allowlist add 203.0.113.10/32 -admin http://127.0.0.1:9090
+
+# 将当前操作机器的外网 IP 一键加入白名单并解封
+./bin/faketunnel allowlist add-self -admin https://vps.example.com:9090
+
+# 查看与解封黑名单 IP
+./bin/faketunnel denylist list -admin http://127.0.0.1:9090
+./bin/faketunnel denylist rm 203.0.113.50 -admin http://127.0.0.1:9090
 ```
 
-## 配置要点
+> 提示：若配置文件目录下存在 `admin.token`，CLI 会自动读取 Token，无需每次传递 `-token` 参数。
 
-| 角色 | 关键字段 |
-|------|----------|
-| Edge | `listen`、`token`、`tls`、`allowlist_file` / `allowlist`、`admin`、`tunnels`、`health_path` |
-| Agent | `edge`、同一 `token`、`tunnels[].local`（按 name 匹配） |
+---
 
-**Admin**（可选，`admin.listen` 非空时启用）：
+## 📖 详细文档
 
-| 字段 | 说明 |
-|------|------|
-| `listen` | 管理 HTTP 口（建议仅本机或经 SSH 转发） |
-| `token` / `token_file` | Bearer 鉴权；与隧道 token 分离 |
-| `metrics` | 是否提供 `/metrics`（默认 true；同样需要 Bearer） |
+- 📘 **[完整使用文档 (docs/usage.md)](docs/usage.md)**：包含详细架构、全部 YAML 配置字段、编译指南、生产环境 Systemd 部署、性能调优与故障排查。
+- 📙 **[场景实践：映射 Gitea 服务 (docs/scenarios/gitea.md)](docs/scenarios/gitea.md)**：包含 Web (HTTP) 与 Git (SSH) 双协议映射的端到端实战配置。
+- 📗 **[示例配置说明 (configs/examples/README.md)](configs/examples/README.md)**：各项示例配置文件的用途与语法说明。
+- 📐 **[技术架构与协议设计 (docs/architecture.md)](docs/architecture.md)**：Yamux 多路复用、帧结构与协议实现细节。
 
-启用 Admin 时必须配置 `allowlist_file`（变更会原子写盘并立即生效）。
+---
 
-**HTTP 隧道**（`type: http`）：HTTP/1 按请求反向代理；HTTP/2 与 `passthrough` 为整连接透传（多路复用、gRPC、mTLS）。
+## 📄 License
 
-| 字段 | 说明 |
-|------|------|
-| `public` | 公网监听；同一地址可挂多个 `host` 路由 |
-| `host` | 匹配 HTTP Host / TLS SNI / HTTP/2 `:authority`；省略为该端口 catch-all |
-| `tls` | `true` 时公网为 TLS |
-| `passthrough` | 与 `tls` 联用：Edge **不终止** TLS，按 SNI 把字节拼到源站（HTTP/2 / gRPC / mTLS 端到端）。源站自己持证 |
-| `http2` | Edge **终止** TLS 时提供 ALPN `h2`；解密后把 h2c 拼到源站（源站需支持 h2c） |
-| `cert` / `key` | 可选（终止模式）；缺省回退 Edge `tls`（含自签） |
-| `local` | Agent 侧本机目标（Agent 配置里也要同名隧道） |
-
-**UDP 隧道**（`type: udp`）：
-
-| 字段 | 说明 |
-|------|------|
-| `public` | 公网 UDP 监听（不可与另一 UDP 隧道重复） |
-| `local` | Agent 侧本机 UDP 目标 |
-| `idle_timeout` | 可选；关联空闲回收时间（未设时 UDP 默认 60s） |
-
-- **Allowlist**：若 `allowlist_file` 存在则以文件为准；否则使用 YAML 中的 `allowlist`。空名单 = 拒绝全部。Admin/`faketunnel` 变更会写回文件。
-- **TLS（隧道）**：生产请使用真实证书，Agent 配置 `tls.ca` 并关闭 `insecure_skip_verify`。
-- **本地目标**：Agent 默认只允许回环 / RFC1918 / IPv6 ULA；需要放宽时设 `local_private_only: false`。
-- 示例中的 `dev-token-change-me` / `admin-dev-token-change-me` 仅为占位符，部署前必须更换。
-
-## Admin API
-
-鉴权：`Authorization: Bearer <admin.token>`。可选 `X-Admin-Actor` 写入审计日志。
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/v1/allowlist` | 列出 CIDR |
-| PUT | `/v1/allowlist` | 全量替换 `{"cidrs":[...]}` |
-| POST | `/v1/allowlist` | 追加 `{"cidr":"..."}` 或 `{"cidrs":[...]}` |
-| DELETE | `/v1/allowlist` | 删除（`?cidr=` 可重复，或 JSON body） |
-| GET | `/v1/status` | Agent 在线、活跃会话、拒绝计数、隧道 RTT |
-| GET | `/metrics` | Prometheus 文本（需 Bearer） |
-
-## 仓库结构
-
-```
-cmd/edge/          公网入口
-cmd/agent/         本机出站客户端
-cmd/faketunnel/      Admin CLI（allowlist / status）
-internal/tunnel/   帧协议、握手、yamux
-internal/acl/      IP/CIDR、JSON 文件、热更新 Store
-internal/admin/    管理 HTTP API
-internal/metrics/  会话 / deny / RTT 指标
-internal/proxy/    TCP/UDP/HTTP 辅助与本地目标校验
-internal/edge/     Edge 服务（TCP + HTTP + UDP + Admin）
-internal/agent/    Agent 重连客户端
-internal/config/   YAML 配置
-configs/examples/  虚构示例（无真实密钥）
-docs/architecture.md
-```
-
-## 文档
-
-- [架构与协议](docs/architecture.md)
-
-## 阶段状态
-
-| 阶段 | 内容 | 状态 |
-|------|------|------|
-| 1 | Go 骨架、TLS+token、yamux、TCP、文件 allowlist | 已完成 |
-| 2 | HTTP/HTTPS 连接透传与 Host/SNI（含 HTTP/2 端到端） | 已完成 |
-| 3 | UDP assoc / datagram | 已完成 |
-| 4 | Admin API/CLI 热更新 allowlist、指标、文档 | 已完成 |
+MIT License

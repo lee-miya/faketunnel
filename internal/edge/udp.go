@@ -92,13 +92,7 @@ func (s *Server) serveUDP(ctx context.Context, tun config.Tunnel, pc net.PacketC
 		if !ok || ua == nil {
 			continue
 		}
-		if !s.acl.Allow(ua.IP) {
-			ipStr := ""
-			if ua.IP != nil {
-				ipStr = ua.IP.String()
-			}
-			s.reg.IncDeny()
-			s.log.Warn("acl deny", "ip", ipStr, "tunnel", tun.Name, "proto", "udp")
+		if !s.publicAllowed(ua.IP, "udp", tun.Name) {
 			continue
 		}
 		hub, err := s.getOrOpenUDPHub(tun, pc)

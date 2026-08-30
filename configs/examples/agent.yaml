@@ -1,24 +1,7 @@
-# 开发示例：Agent 主动出站连接 Edge，无需开放本机入站端口。
+# 开发示例：Agent 只需连上 Edge。
+# 不必列 tunnels：Edge 把每条流的 local 下发过来。
+# 若列出 tunnels，则按 name 作为允许名单，并可覆盖 local（须与 Edge 的 name 一致）。
+# 未配 tls.ca 时跳过证书校验并打 warn。生产请拷 Edge 的 certs/edge.crt 并设 insecure_skip_verify: false。
+
 edge: "127.0.0.1:8443"
 token: "dev-token-change-me"
-tls:
-  insecure_skip_verify: true
-  server_name: localhost
-tunnels:
-  - name: echo
-    type: tcp
-    local: "127.0.0.1:9000"
-  - name: web
-    type: http
-    local: "127.0.0.1:3000"
-  - name: web-tls
-    type: http
-    local: "127.0.0.1:3000"
-  - name: web-h2
-    type: http
-    local: "127.0.0.1:3443"
-  - name: dns-demo
-    type: udp
-    local: "127.0.0.1:9053"
-log_level: info
-# local_private_only: true

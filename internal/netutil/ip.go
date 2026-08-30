@@ -10,16 +10,18 @@ import (
 
 const maxProxyLine = 108
 
-// IPFromAddr parses a host:port or bare IP string into an IP.
-func IPFromAddr(addr string) net.IP {
-	if addr == "" {
-		return nil
-	}
-	host, _, err := net.SplitHostPort(addr)
+// ListenHostIsLoopback reports whether a listen address (host:port) is bound
+// to a loopback IP or the name "localhost". Empty or unparseable hosts are not.
+func ListenHostIsLoopback(addr string) bool {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(addr))
 	if err != nil {
-		return net.ParseIP(addr)
+		return false
 	}
-	return net.ParseIP(host)
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // IPFromConn returns the remote IP, or nil if it cannot be parsed.
@@ -28,13 +30,35 @@ func IPFromConn(c net.Conn) net.IP {
 		return nil
 	}
 	addr := c.RemoteAddr()
-	if ta, ok := addr.(*net.TCPAddr); ok {
-		return ta.IP
-	}
 	if addr == nil {
 		return nil
 	}
+	switch a := addr.(type) {
+	case *net.TCPAddr:
+		if a != nil && len(a.IP) > 0 {
+			return a.IP
+		}
+	case *net.UDPAddr:
+		if a != nil && len(a.IP) > 0 {
+			return a.IP
+		}
+	}
 	return IPFromAddr(addr.String())
+}
+
+// IPFromAddr parses a host:port or bare IP string into an IP.
+func IPFromAddr(addr string) net.IP {
+	if addr == "" {
+		return nil
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	if i := strings.IndexByte(host, '%'); i >= 0 {
+		host = host[:i]
+	}
+	return net.ParseIP(host)
 }
 
 // CloseReset closes c so a TCP peer typically sees RST (SO_LINGER 0).

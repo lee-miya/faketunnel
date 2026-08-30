@@ -25,15 +25,20 @@ func FromConfig(filePath string, yamlEntries []string, log *slog.Logger) (*List,
 			return nil, err
 		}
 	}
-	l, err := New(yamlEntries)
+	entries := yamlEntries
+	if len(entries) == 0 && filePath != "" {
+		entries = []string{"127.0.0.1/32", "::1/128"}
+		log.Info("allowlist defaulted to loopback; add visitor IPs with faketunnel allowlist add")
+	}
+	l, err := New(entries)
 	if err != nil {
 		return nil, err
 	}
-	if filePath != "" && len(yamlEntries) > 0 {
-		if err := SaveFile(filePath, yamlEntries); err != nil {
+	if filePath != "" {
+		if err := SaveFile(filePath, entries); err != nil {
 			log.Warn("allowlist file not written", "path", filePath, "err", err)
 		} else {
-			log.Info("allowlist file created from yaml", "path", filePath, "entries", l.Len())
+			log.Info("allowlist file created", "path", filePath, "entries", l.Len())
 		}
 	}
 	if l.Len() == 0 {

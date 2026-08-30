@@ -81,6 +81,8 @@ type Status struct {
 	AgentConnected bool    `json:"agent_connected"`
 	ActiveSessions int64   `json:"active_sessions"`
 	ACLDenies      uint64  `json:"acl_denies"`
+	TempBans       int     `json:"temp_bans"`
+	PermanentBans  int     `json:"permanent_bans"`
 	TunnelRTTMs    float64 `json:"tunnel_rtt_ms,omitempty"`
 	HasRTT         bool    `json:"has_rtt"`
 }
@@ -101,7 +103,11 @@ func (r *Registry) Snapshot() Status {
 
 // WritePrometheus writes Prometheus exposition format to w.
 func (r *Registry) WritePrometheus(w io.Writer) error {
-	st := r.Snapshot()
+	return WriteStatus(w, r.Snapshot())
+}
+
+// WriteStatus writes a Status snapshot as Prometheus text.
+func WriteStatus(w io.Writer, st Status) error {
 	agent := 0
 	if st.AgentConnected {
 		agent = 1
@@ -112,10 +118,16 @@ faketunnel_agent_connected %d
 # HELP faketunnel_active_sessions Active TCP/HTTP sessions and UDP associations.
 # TYPE faketunnel_active_sessions gauge
 faketunnel_active_sessions %d
-# HELP faketunnel_acl_denies_total Total public connections rejected by allowlist.
+# HELP faketunnel_acl_denies_total Total public connections rejected by allowlist or IP ban.
 # TYPE faketunnel_acl_denies_total counter
 faketunnel_acl_denies_total %d
-`, agent, st.ActiveSessions, st.ACLDenies)
+# HELP faketunnel_temp_bans IPs currently under a 6h temporary ban.
+# TYPE faketunnel_temp_bans gauge
+faketunnel_temp_bans %d
+# HELP faketunnel_permanent_bans IPs permanently banned after a second ban.
+# TYPE faketunnel_permanent_bans gauge
+faketunnel_permanent_bans %d
+`, agent, st.ActiveSessions, st.ACLDenies, st.TempBans, st.PermanentBans)
 	if err != nil {
 		return err
 	}

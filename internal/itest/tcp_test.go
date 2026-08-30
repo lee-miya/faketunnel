@@ -58,6 +58,47 @@ func TestEndToEndTCP(t *testing.T) {
 	echoRetry(t, public, 8*time.Second)
 }
 
+func TestAgentOmitsTunnelsUsesEdgeLocal(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skip e2e in short mode")
+	}
+	backend := startEcho(t)
+	edgeCfg, agentCfg := testPair(t)
+	agentCfg.Tunnels = nil
+
+	list, err := acl.New([]string{"127.0.0.1/32", "::1/128"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := logutil.New("error", "text")
+	edgeCfg.Tunnels[0].Local = backend
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	srv, err := edge.New(edgeCfg, list, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Shutdown()
+
+	agentCfg.Edge = srv.TunnelAddr()
+	cli, err := agent.New(agentCfg, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = cli.Run(ctx) }()
+
+	public := srv.PublicAddr("echo")
+	if public == "" {
+		t.Fatal("missing public addr")
+	}
+	echoRetry(t, public, 8*time.Second)
+}
+
 func TestACLDeny(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skip e2e in short mode")

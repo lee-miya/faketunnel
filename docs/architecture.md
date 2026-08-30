@@ -1,17 +1,18 @@
-# fakeTunnel 架构（Phase 1–4）
+# fakeTunnel 架构
 
 ## 角色
 
 - **Edge**：跑在公网 VPS。监听 Agent 隧道口（TLS）以及各 TCP / HTTP(S) / UDP 公网端口。入站连接先做 IP allowlist，命中后经 yamux 交给 Agent。
-- **Agent**：只出站连接 Edge（NAT/防火墙友好）。按 tunnel name 把流/关联拨到本机 `local` 目标。
-- **Allowlist**：Edge 本地 JSON 文件 + 内存原子替换；Admin API / CLI 写盘后立即生效，无需重启。
-- **Admin**：独立 HTTP 管理口（Bearer token）；可热改 allowlist、查看状态与 Prometheus 指标。
+- **Agent**：只出站连接 Edge（NAT/防火墙友好）。默认按 Edge 在 OpenStream 里下发的 `local` 拨号（本机环回或内网 `IP:端口`）；配置里仍可列出 tunnels 作为允许名单或覆盖目标。
+- **Allowlist**：Edge 本地 JSON 文件 + 内存原子替换；Admin API / CLI 写盘后立即生效，无需重启。文件缺失时默认写入环回。
+- **Denylist**：同一 IP 连续 5 次无效（业务口 ACL deny 或 Admin 鉴权失败）临时封禁 6 小时；第二次封禁永久。持久化 `denylist.json`。
+- **Admin**：默认在 `127.0.0.1:9090`；Bearer token 可自动生成到 `admin.token`。可热改 allowlist、解封、查看状态与 Prometheus 指标。非环回监听强制 HTTPS。
 
 ```
-Internet client --TCP/HTTP(S)/UDP--> Edge --TLS+yamux--> Agent --TCP/UDP--> 127.0.0.1:...
-                 ACL deny → RST/关闭/丢弃（HTTP 可回 403）
+Internet client --TCP/HTTP(S)/UDP--> Edge --TLS+yamux--> Agent --TCP/UDP--> local
+                 ACL deny / banned → RST/关闭/丢弃（HTTP 可回 403）
 
-Admin CLI/API --Bearer--> Edge admin port → allowlist.json + in-memory Replace
+Admin CLI/API --Bearer--> Edge admin port → allowlist.json / denylist.json
 ```
 
 ## 安全模型
@@ -19,9 +20,9 @@ Admin CLI/API --Bearer--> Edge admin port → allowlist.json + in-memory Replace
 | 层 | 行为 |
 |---|---|
 | 隧道身份 | Agent 在 TLS 之后发送预共享 token；失败不进入 yamux |
-| 访问控制 | 取 `RemoteAddr`（可选 PROXY protocol v1）；默认 deny |
-| 管理面 | Admin 独立 `listen` + Bearer；建议仅本机或 SSH 转发；审计日志记录 actor/动作/CIDR |
-| 传输 | 隧道 TLS 1.2+，ALPN `faketunnel/1`；公网 HTTPS 终止用独立证书（无 faketunnel ALPN）；`passthrough` 时公网 TLS 直达源站 |
+| 访问控制 | 取 `RemoteAddr`（可选 PROXY protocol v1）；默认 deny；连续 5 次无效 → 6h 临时封禁，第二次永久 |
+| 管理面 | Admin 独立 `listen` + Bearer；环回明文 HTTP，非环回强制 HTTPS（复用 Edge 证书）；错误口令计入封禁；审计日志记录 actor/动作/CIDR |
+| 传输 | 隧道 TLS 1.2+，ALPN `faketunnel/1`；公网 HTTPS 终止用独立证书（无 faketunnel ALPN）；`passthrough` 时公网 TLS 直达源站；公网 Admin 为 HTTPS `http/1.1` |
 | 最小暴露 | Agent 无入站端口；本地目标默认仅回环 / RFC1918 / ULA |
 
 Token 使用 SHA-256 后恒定时间比较，日志不记录 token。Admin token 与隧道 token 分离。
@@ -51,7 +52,7 @@ TLS 握手完成后，先走自定义 **8 字节头 + payload** 帧（版本字�
   - HTTP/1 仍按请求开 stream（Host 路由）；HTTP/2 / TLS passthrough 一条客户端连接一条 stream
 - 每个 UDP 隧道对应一条专用 yamux stream（`ProtoUDP`）：其上复用 `OpenAssoc` / `OpenAssocAck` / `Datagram` / `CloseAssoc`（带 assoc id），避免每包开 stream
 
-未实现（可后续扩展）：`CloseStream`、`ConfigPush`。
+未实现（可后续扩展）：`CloseStream`。隧道列表由 Edge YAML 定义，经 OpenStream 的 `local` 字段交给 Agent，无需 ConfigPush。
 
 ## HTTP/HTTPS（连接透传）
 
@@ -68,7 +69,7 @@ TLS 握手完成后，先走自定义 **8 字节头 + payload** 帧（版本字�
 
 HTTP/2 能力（passthrough 或 terminate+h2c）：多路复用、HPACK、流式 body、trailer、gRPC、CONNECT。Edge 不改写 hop-by-hop 头。一条 HTTP/2 连接按握手时的 SNI / 首个 `:authority` 固定到一条隧道。
 
-## UDP（Phase 3）
+## UDP
 
 - Edge 对 `type: udp` 做 `ListenPacket`；ACL 按源 IP 过滤，拒绝则丢弃。
 - 首包到达且 Agent 在线时，Edge 打开该隧道的 UDP hub stream；按 `(clientIP, clientPort)` 建 **assoc**，分配 `uint32` id。
@@ -83,7 +84,7 @@ HTTP/2 能力（passthrough 或 terminate+h2c）：多路复用、HPACK、流式
 - 背压：hub stream 写失败时关闭对应 assoc；过大包直接丢弃并打日志。
 - 与 TCP/HTTP 相同端口号可共存（协议不同）；同一 `public` 不可挂两个 UDP 隧道。
 
-## Allowlist 与 Admin（Phase 4）
+## Allowlist 与 Admin
 
 `allowlist.json`：
 
@@ -101,11 +102,11 @@ HTTP/2 能力（passthrough 或 terminate+h2c）：多路复用、HPACK、流式
 2. 临时文件 + `rename` 写盘
 3. `slog` 审计：`action`、`actor`、`cidrs`、`entries`
 
-启用 `admin.listen` 时必须配置 `admin.token`（或 `token_file`）与 `allowlist_file`。
+启用 Admin 时（默认开启）必须能落到 Admin token 与 `allowlist_file`（均可由默认值补齐）。
 
-API：`GET/PUT/POST/DELETE /v1/allowlist`，`GET /v1/status`，可选 `GET /metrics`。
+API：`GET/PUT/POST/DELETE /v1/allowlist`，`POST /v1/allowlist/self`，`GET/DELETE /v1/denylist`，`GET /v1/status`，可选 `GET /metrics`。
 
-CLI：`faketunnel allowlist list|add|rm|set`、`faketunnel status`（`-admin` / `-token` 或环境变量 `FAKETUNNEL_ADMIN` / `FAKETUNNEL_TOKEN`）。
+CLI：`faketunnel init`、`faketunnel allowlist list|add|add-self|rm|set`、`faketunnel denylist list|rm`、`faketunnel status`（`-admin` / `-token` / `-insecure` 或环境变量 / `admin.token` 文件）。
 
 ## 指标
 
@@ -115,7 +116,9 @@ Prometheus 文本（Admin 口，需 Bearer）：
 |------|------|------|
 | `faketunnel_agent_connected` | gauge | Agent 是否在线 |
 | `faketunnel_active_sessions` | gauge | TCP/HTTP 会话 + 就绪 UDP assoc |
-| `faketunnel_acl_denies_total` | counter | allowlist 拒绝次数 |
+| `faketunnel_acl_denies_total` | counter | allowlist 拒绝或已封禁 IP 的次数 |
+| `faketunnel_temp_bans` | gauge | 当前 6 小时临时封禁数 |
+| `faketunnel_permanent_bans` | gauge | 永久封禁数 |
 | `faketunnel_tunnel_rtt_seconds` | gauge | 最近一次 control Ping/Pong RTT |
 
 ## 运行时

@@ -39,3 +39,19 @@ func TestFromConfigEmptyDenyAll(t *testing.T) {
 		t.Fatal("expected empty")
 	}
 }
+
+func TestFromConfigDefaultLoopback(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "allowlist.json")
+	l, err := FromConfig(path, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l.Len() != 2 {
+		t.Fatalf("len=%d", l.Len())
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal(err)
+	}
+}

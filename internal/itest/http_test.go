@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -55,16 +56,20 @@ func TestEndToEndHTTPHostRouting(t *testing.T) {
 	}
 	log := logutil.New("error", "text")
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	srv, err := edge.New(edgeCfg, list, log)
 	if err != nil {
+		cancel()
 		t.Fatal(err)
 	}
 	if err := srv.Start(ctx); err != nil {
+		cancel()
 		t.Fatal(err)
 	}
-	defer srv.Shutdown()
+	defer func() {
+		cancel()
+		_ = srv.Shutdown()
+	}()
 
 	agentCfg.Edge = srv.TunnelAddr()
 	cli, err := agent.New(agentCfg, log)
@@ -119,16 +124,20 @@ func TestEndToEndHTTPSNI(t *testing.T) {
 	}
 	log := logutil.New("error", "text")
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	srv, err := edge.New(edgeCfg, list, log)
 	if err != nil {
+		cancel()
 		t.Fatal(err)
 	}
 	if err := srv.Start(ctx); err != nil {
+		cancel()
 		t.Fatal(err)
 	}
-	defer srv.Shutdown()
+	defer func() {
+		cancel()
+		_ = srv.Shutdown()
+	}()
 
 	agentCfg.Edge = srv.TunnelAddr()
 	cli, err := agent.New(agentCfg, log)
@@ -170,6 +179,80 @@ func TestEndToEndHTTPSNI(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatalf("https: %v", last)
+}
+
+func TestEndToEndHTTPCatchAllByIP(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skip e2e in short mode")
+	}
+	backend := startHTTPBackend(t, "gitea-like")
+	edgeCfg, agentCfg := testPair(t)
+	edgeCfg.Tunnels = []config.Tunnel{{
+		Name: "web", Type: config.TypeHTTP, Public: "127.0.0.1:0", Local: backend,
+	}}
+	agentCfg.Tunnels = []config.Tunnel{{Name: "web", Type: config.TypeHTTP, Local: backend}}
+	public := startHTTPPair(t, edgeCfg, agentCfg, "web")
+	// No Host override: client uses the IP:port, as a browser would when given a VPS address.
+	body := waitHTTP(t, "http://"+public+"/ping", "", http.StatusOK, "gitea-like", 8*time.Second)
+	if body != "gitea-like" {
+		t.Fatalf("body=%q", body)
+	}
+}
+
+func TestEndToEndHTTPForwardedHeaders(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skip e2e in short mode")
+	}
+	backend := startHTTPBackend(t, "unused")
+	edgeCfg, agentCfg := testPair(t)
+	edgeCfg.Tunnels = []config.Tunnel{{
+		Name: "web-tls", Type: config.TypeHTTP, Public: "127.0.0.1:0",
+		TLS: true, Host: "app.example", Local: backend,
+	}}
+	agentCfg.Tunnels = []config.Tunnel{{Name: "web-tls", Type: config.TypeHTTP, Local: backend}}
+	public := startHTTPPair(t, edgeCfg, agentCfg, "web-tls")
+
+	client := &http.Client{
+		Timeout: 3 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: true,
+				ServerName:         "app.example",
+				MinVersion:         tls.VersionTLS12,
+			},
+		},
+	}
+	deadline := time.Now().Add(8 * time.Second)
+	var last error
+	for time.Now().Before(deadline) {
+		req, err := http.NewRequest(http.MethodGet, "https://"+public+"/headers", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Host = "app.example"
+		resp, err := client.Do(req)
+		if err != nil {
+			last = err
+			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			last = fmt.Errorf("status=%d body=%q", resp.StatusCode, body)
+			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+		got := string(body)
+		if !strings.Contains(got, "X-Forwarded-Proto=https") {
+			t.Fatalf("missing proto header: %q", got)
+		}
+		if !strings.Contains(got, "X-Forwarded-Host=app.example") {
+			t.Fatalf("missing host header: %q", got)
+		}
+		return
+	}
+	t.Fatalf("headers: %v", last)
 }
 
 func TestEndToEndHTTPKeepAlive(t *testing.T) {
@@ -355,21 +438,32 @@ func startHTTPPair(t *testing.T, edgeCfg, agentCfg *config.File, name string) st
 	}
 	log := logutil.New("error", "text")
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
 	srv, err := edge.New(edgeCfg, list, log)
 	if err != nil {
+		cancel()
 		t.Fatal(err)
 	}
 	if err := srv.Start(ctx); err != nil {
+		cancel()
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = srv.Shutdown() })
+	t.Cleanup(func() {
+		cancel()
+		_ = srv.Shutdown()
+	})
 	agentCfg.Edge = srv.TunnelAddr()
 	cli, err := agent.New(agentCfg, log)
 	if err != nil {
 		t.Fatal(err)
 	}
 	go func() { _ = cli.Run(ctx) }()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if srv.Metrics().Snapshot().AgentConnected {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	public := srv.PublicAddr(name)
 	if public == "" {
 		t.Fatal("missing public addr")
@@ -386,6 +480,10 @@ func startHTTPBackend(t *testing.T, body string) string {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ping", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, body)
+	})
+	mux.HandleFunc("/headers", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "X-Forwarded-Proto=%s\nX-Forwarded-Host=%s\n",
+			r.Header.Get("X-Forwarded-Proto"), r.Header.Get("X-Forwarded-Host"))
 	})
 	srv := &http.Server{Handler: mux}
 	t.Cleanup(func() {

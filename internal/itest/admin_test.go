@@ -130,6 +130,84 @@ func TestAdminAllowlistHotReload(t *testing.T) {
 	t.Fatal("expected deny after allowlist remove")
 }
 
+func TestIPBanAfterFiveDenies(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skip e2e in short mode")
+	}
+	edgeCfg, _ := testPair(t)
+	dir := t.TempDir()
+	allowPath := filepath.Join(dir, "allowlist.json")
+	if err := acl.SaveFile(allowPath, []string{"203.0.113.10/32"}); err != nil {
+		t.Fatal(err)
+	}
+	edgeCfg.AllowlistFile = allowPath
+	edgeCfg.DenylistFile = filepath.Join(dir, "denylist.json")
+	edgeCfg.Admin = config.Admin{Listen: "127.0.0.1:0", Token: "admin-test-token"}
+	list, err := acl.LoadFile(allowPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := logutil.New("error", "text")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	srv, err := edge.New(edgeCfg, list, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Shutdown()
+
+	if srv.Store().Allow(net.ParseIP("127.0.0.1")) || srv.Store().Allow(net.ParseIP("::1")) {
+		t.Fatalf("loopback should be denied, entries=%v", srv.Store().Entries())
+	}
+	public := srv.PublicAddr("echo")
+	if public == "" {
+		t.Fatal("missing public addr")
+	}
+	for i := 0; i < 8; i++ {
+		c, err := net.DialTimeout("tcp", public, time.Second)
+		if err != nil {
+			continue
+		}
+		_ = c.SetDeadline(time.Now().Add(time.Second))
+		_, _ = c.Write([]byte("x"))
+		_ = c.Close()
+	}
+
+	adminBase := "http://" + srv.AdminAddr()
+	deadline := time.Now().Add(3 * time.Second)
+	var body []byte
+	for time.Now().Before(deadline) {
+		req, err := http.NewRequest(http.MethodGet, adminBase+"/v1/denylist", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer admin-test-token")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode == 200 && bytes.Contains(body, []byte("temporary")) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !bytes.Contains(body, []byte("temporary")) {
+		t.Fatalf("want temp ban in denylist (denies=%d entries=%v bans=%v): %s", srv.Metrics().Denies(), srv.Store().Entries(), srv.Bans().List(), body)
+	}
+	data, err := os.ReadFile(edgeCfg.DenylistFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(data, []byte("127.0.0.1")) && !bytes.Contains(data, []byte("::1")) {
+		t.Fatalf("denylist file missing loopback: %s", data)
+	}
+}
+
 func TestMetricsAndStatus(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skip e2e in short mode")

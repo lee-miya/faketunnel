@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -10,6 +11,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"faketunnel/internal/config"
 )
 
 var version = "dev"
@@ -27,8 +30,20 @@ func run(args []string) int {
 	case "version", "-version", "--version":
 		fmt.Println(version)
 		return 0
+	case "init":
+		if err := runInit(args[1:]); err != nil {
+			fmt.Fprintf(os.Stderr, "faketunnel: %v\n", err)
+			return 1
+		}
+		return 0
 	case "allowlist":
 		if err := runAllowlist(args[1:]); err != nil {
+			fmt.Fprintf(os.Stderr, "faketunnel: %v\n", err)
+			return 1
+		}
+		return 0
+	case "denylist", "ban":
+		if err := runDenylist(args[1:]); err != nil {
 			fmt.Fprintf(os.Stderr, "faketunnel: %v\n", err)
 			return 1
 		}
@@ -50,19 +65,23 @@ func run(args []string) int {
 }
 
 func usage() {
-	fmt.Fprintf(os.Stderr, `fakeTunnel CLI — 管理 Edge allowlist 与状态
+	fmt.Fprintf(os.Stderr, `fakeTunnel CLI — 初始化配置、管理 Edge allowlist / denylist 与状态
 
 用法:
+  faketunnel init            [-dir DIR] [-edge HOST] [-http 8080:3000] [-tcp 2222]
   faketunnel allowlist list  [-admin URL] [-token TOKEN] [-token-file PATH]
   faketunnel allowlist add   <cidr>... [-admin URL] [-token TOKEN]
+  faketunnel allowlist add-self [-admin URL] [-token TOKEN]
   faketunnel allowlist rm    <cidr>... [-admin URL] [-token TOKEN]
   faketunnel allowlist set   <cidr>... [-admin URL] [-token TOKEN]
+  faketunnel denylist list   [-admin URL] [-token TOKEN]
+  faketunnel denylist rm     <ip>... [-admin URL] [-token TOKEN]
   faketunnel status          [-admin URL] [-token TOKEN]
   faketunnel version
 
 环境变量:
-  FAKETUNNEL_ADMIN   Admin API 根地址（默认 http://127.0.0.1:9090）
-  FAKETUNNEL_TOKEN   Admin Bearer token
+  FAKETUNNEL_ADMIN   Admin API 根地址（默认 http://127.0.0.1:9090；公网请用 https://）
+  FAKETUNNEL_TOKEN   Admin Bearer token（也可放在 ./admin.token）
 
 `)
 }
@@ -79,7 +98,9 @@ func newClient(fs *flag.FlagSet, args []string) (*client, []string, error) {
 	token := fs.String("token", os.Getenv("FAKETUNNEL_TOKEN"), "Admin Bearer token")
 	tokenFile := fs.String("token-file", "", "read admin token from file")
 	actor := fs.String("actor", "", "optional X-Admin-Actor audit label")
-	if err := fs.Parse(args); err != nil {
+	insecure := fs.Bool("insecure", false, "skip TLS certificate verify (self-signed Admin HTTPS)")
+	positional, err := parseFlagSet(fs, args)
+	if err != nil {
 		return nil, nil, err
 	}
 	tok := strings.TrimSpace(*token)
@@ -91,14 +112,38 @@ func newClient(fs *flag.FlagSet, args []string) (*client, []string, error) {
 		tok = strings.TrimSpace(string(data))
 	}
 	if tok == "" {
-		return nil, nil, fmt.Errorf("admin token required (-token, -token-file, or FAKETUNNEL_TOKEN)")
+		tok = config.DiscoverAdminToken()
+	}
+	if tok == "" {
+		return nil, nil, fmt.Errorf("admin token required (-token, -token-file, FAKETUNNEL_TOKEN, or admin.token file)")
+	}
+	hc := &http.Client{Timeout: 15 * time.Second}
+	if *insecure {
+		hc.Transport = &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
+		}
 	}
 	return &client{
 		base:  strings.TrimRight(strings.TrimSpace(*adminURL), "/"),
 		token: tok,
-		http:  &http.Client{Timeout: 15 * time.Second},
+		http:  hc,
 		actor: strings.TrimSpace(*actor),
-	}, fs.Args(), nil
+	}, positional, nil
+}
+
+func parseFlagSet(fs *flag.FlagSet, args []string) ([]string, error) {
+	var positional []string
+	for len(args) > 0 {
+		if err := fs.Parse(args); err != nil {
+			return nil, err
+		}
+		args = fs.Args()
+		if len(args) > 0 {
+			positional = append(positional, args[0])
+			args = args[1:]
+		}
+	}
+	return positional, nil
 }
 
 func envOr(k, def string) string {
@@ -110,7 +155,7 @@ func envOr(k, def string) string {
 
 func runAllowlist(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("allowlist requires subcommand: list|add|rm|set")
+		return fmt.Errorf("allowlist requires subcommand: list|add|add-self|rm|set")
 	}
 	sub := args[0]
 	fs := flag.NewFlagSet("allowlist "+sub, flag.ContinueOnError)
@@ -129,6 +174,8 @@ func runAllowlist(args []string) error {
 			fmt.Println(c)
 		}
 		return nil
+	case "add-self", "addself", "me":
+		return cli.addSelf()
 	case "add":
 		if len(rest) == 0 {
 			return fmt.Errorf("usage: faketunnel allowlist add <cidr>...")
@@ -206,6 +253,54 @@ func (c *client) postAllowlist(cidrs []string) error {
 func (c *client) deleteAllowlist(cidrs []string) error {
 	payload, _ := json.Marshal(allowlistDTO{CIDRs: cidrs})
 	body, err := c.do(http.MethodDelete, "/v1/allowlist", payload)
+	if err != nil {
+		return err
+	}
+	return printCIDRs(body)
+}
+
+func runDenylist(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("denylist requires subcommand: list|rm")
+	}
+	sub := args[0]
+	fs := flag.NewFlagSet("denylist "+sub, flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	cli, rest, err := newClient(fs, args[1:])
+	if err != nil {
+		return err
+	}
+	switch sub {
+	case "list":
+		body, err := cli.do(http.MethodGet, "/v1/denylist", nil)
+		if err != nil {
+			return err
+		}
+		var pretty bytes.Buffer
+		if err := json.Indent(&pretty, body, "", "  "); err != nil {
+			fmt.Println(string(body))
+			return nil
+		}
+		fmt.Println(pretty.String())
+		return nil
+	case "rm", "remove", "delete", "unban":
+		if len(rest) == 0 {
+			return fmt.Errorf("usage: faketunnel denylist rm <ip>...")
+		}
+		payload, _ := json.Marshal(map[string]any{"ips": rest})
+		body, err := cli.do(http.MethodDelete, "/v1/denylist", payload)
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(body))
+		return nil
+	default:
+		return fmt.Errorf("unknown denylist subcommand %q", sub)
+	}
+}
+
+func (c *client) addSelf() error {
+	body, err := c.do(http.MethodPost, "/v1/allowlist/self", []byte("{}"))
 	if err != nil {
 		return err
 	}

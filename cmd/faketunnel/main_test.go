@@ -11,6 +11,7 @@ import (
 
 	"faketunnel/internal/acl"
 	"faketunnel/internal/admin"
+	"faketunnel/internal/ban"
 	"faketunnel/internal/metrics"
 )
 
@@ -30,6 +31,27 @@ func TestCLIVersion(t *testing.T) {
 	})
 	if strings.TrimSpace(out) != version {
 		t.Fatalf("--version=%q", out)
+	}
+}
+
+func TestCLIInit(t *testing.T) {
+	dir := t.TempDir()
+	out := captureStdout(t, func() {
+		if code := run([]string{"init", "-dir", dir, "-edge", "203.0.113.10", "-http", "8080:3000", "-tcp", "2222"}); code != 0 {
+			t.Fatalf("init exit=%d", code)
+		}
+	})
+	if !strings.Contains(out, "已生成") {
+		t.Fatalf("init out=%q", out)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "edge.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "agent.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if code := run([]string{"init", "-dir", dir, "-http", "80:80"}); code != 1 {
+		t.Fatalf("overwrite without -force exit=%d", code)
 	}
 }
 
@@ -204,6 +226,71 @@ func TestCLIErrors(t *testing.T) {
 	}
 }
 
+func TestCLIAddSelfAndDenylist(t *testing.T) {
+	t.Setenv("FAKETUNNEL_TOKEN", "secret")
+	base, _, _ := startAdmin(t)
+
+	out := captureStdout(t, func() {
+		if err := runAllowlist([]string{"add-self", "-admin", base, "-token", "secret"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(out, "127.0.0.1") && !strings.Contains(out, "::1") {
+		t.Fatalf("add-self=%q", out)
+	}
+
+	out = captureStdout(t, func() {
+		if err := runDenylist([]string{"list", "-admin", base, "-token", "secret"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(out, "entries") {
+		t.Fatalf("denylist list=%q", out)
+	}
+}
+
+func TestCLIArgsOrdering(t *testing.T) {
+	t.Setenv("FAKETUNNEL_TOKEN", "")
+	base, store, _ := startAdmin(t)
+	tok := "secret"
+
+	// Positional args BEFORE flags
+	out := captureStdout(t, func() {
+		if err := runAllowlist([]string{"add", "198.51.100.1/32", "-admin", base, "-token", tok}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(out, "198.51.100.1/32") {
+		t.Fatalf("add out=%q", out)
+	}
+	if !store.Allow(mustParseIP("198.51.100.1")) {
+		t.Fatal("198.51.100.1 not allowed")
+	}
+
+	// Positional args AFTER flags
+	out = captureStdout(t, func() {
+		if err := runAllowlist([]string{"rm", "-admin", base, "-token", tok, "198.51.100.1/32"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if strings.Contains(out, "198.51.100.1/32") {
+		t.Fatalf("rm out=%q", out)
+	}
+	if store.Allow(mustParseIP("198.51.100.1")) {
+		t.Fatal("198.51.100.1 still allowed")
+	}
+
+	// Denylist rm with positional args before flags
+	out = captureStdout(t, func() {
+		if err := runDenylist([]string{"rm", "203.0.113.99", "-admin", base, "-token", tok}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(out, "entries") {
+		t.Fatalf("denylist rm out=%q", out)
+	}
+}
+
 func startAdmin(t *testing.T) (string, *acl.Store, *metrics.Registry) {
 	t.Helper()
 	dir := t.TempDir()
@@ -214,7 +301,8 @@ func startAdmin(t *testing.T) (string, *acl.Store, *metrics.Registry) {
 	}
 	store := acl.NewStore(list, path, nil)
 	reg := &metrics.Registry{}
-	srv, err := admin.New(admin.Config{Listen: "127.0.0.1:0", Token: "secret", Metrics: true}, store, reg, nil, nil)
+	bans := ban.New("", nil)
+	srv, err := admin.New(admin.Config{Listen: "127.0.0.1:0", Token: "secret", Metrics: true, Bans: bans}, store, reg, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

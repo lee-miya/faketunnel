@@ -1,0 +1,21 @@
+[Unit]
+Description=fakeTunnel Agent (outbound tunnel client)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=faketunnel
+Group=faketunnel
+WorkingDirectory=/opt/faketunnel
+ExecStart=/opt/faketunnel/bin/agent -config /opt/faketunnel/configs/agent.yaml
+Restart=always
+RestartSec=2
+LimitNOFILE=65535
+NoNewPrivileges=true
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=faketunnel-agent
+
+[Install]
+WantedBy=multi-user.target

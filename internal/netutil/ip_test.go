@@ -69,3 +69,13 @@ func TestReadLineLimit(t *testing.T) {
 		t.Fatal("expected too long")
 	}
 }
+
+func TestListenHostIsLoopback(t *testing.T) {
+	t.Parallel()
+	if !ListenHostIsLoopback("127.0.0.1:9090") || !ListenHostIsLoopback("[::1]:9090") || !ListenHostIsLoopback("localhost:9090") {
+		t.Fatal("expected loopback")
+	}
+	if ListenHostIsLoopback("0.0.0.0:9090") || ListenHostIsLoopback(":9090") || ListenHostIsLoopback("not-an-addr") {
+		t.Fatal("expected non-loopback")
+	}
+}

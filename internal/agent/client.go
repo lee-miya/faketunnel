@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"net"
+	"strings"
 	"time"
 
 	"faketunnel/internal/config"
@@ -39,9 +40,15 @@ func New(cfg *config.File, log *slog.Logger) (*Client, error) {
 	if log == nil {
 		log = slog.Default()
 	}
-	tlsCfg, err := tlsutil.ClientConfig(cfg.TLS.CA, cfg.TLS.ServerName, cfg.TLS.InsecureSkipVerify)
+	tlsCfg, err := tlsutil.ClientConfig(cfg.TLS.CA, cfg.TLS.ServerName, cfg.SkipVerify())
 	if err != nil {
 		return nil, err
+	}
+	if cfg.SkipVerify() && strings.TrimSpace(cfg.TLS.CA) == "" {
+		log.Warn("tls.ca unset; skipping certificate verification — set tls.ca and insecure_skip_verify: false in production")
+	}
+	if cfg.Token == "dev-token-change-me" {
+		log.Warn("using example tunnel token; replace before connecting to a public Edge")
 	}
 	return &Client{cfg: cfg, log: log, tls: tlsCfg}, nil
 }
@@ -50,13 +57,17 @@ func New(cfg *config.File, log *slog.Logger) (*Client, error) {
 func (c *Client) Run(ctx context.Context) error {
 	backoff := time.Duration(0)
 	for {
-		err := c.connectOnce(ctx)
+		established, err := c.connectOnce(ctx)
 		if ctx.Err() != nil {
 			c.log.Info("agent stopped")
 			return ctx.Err()
 		}
 		if err != nil {
 			c.log.Warn("tunnel disconnected", "err", err)
+		}
+		if established {
+			// Healthy sessions should not inherit a long failure backoff.
+			backoff = 0
 		}
 		backoff = nextBackoff(backoff)
 		c.log.Info("reconnect scheduled", "wait", backoff.String())
@@ -70,7 +81,7 @@ func (c *Client) Run(ctx context.Context) error {
 	}
 }
 
-func (c *Client) connectOnce(ctx context.Context) error {
+func (c *Client) connectOnce(ctx context.Context) (bool, error) {
 	dialer := &tls.Dialer{
 		NetDialer: &net.Dialer{Timeout: c.cfg.DialOrDefault()},
 		Config:    c.tls,
@@ -78,7 +89,7 @@ func (c *Client) connectOnce(ctx context.Context) error {
 	c.log.Info("dialing edge", "addr", c.cfg.Edge)
 	conn, err := dialer.DialContext(ctx, "tcp", c.cfg.Edge)
 	if err != nil {
-		return fmt.Errorf("dial: %w", err)
+		return false, fmt.Errorf("dial: %w", err)
 	}
 	defer conn.Close()
 
@@ -87,17 +98,17 @@ func (c *Client) connectOnce(ctx context.Context) error {
 		id = "agent"
 	}
 	if err := tunnel.ClientHandshake(conn, c.cfg.Token, id, 0); err != nil {
-		return err
+		return false, err
 	}
 	sess, err := tunnel.ClientSession(conn, c.log)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer sess.Close()
 
 	ctrl, err := sess.Open()
 	if err != nil {
-		return fmt.Errorf("open control: %w", err)
+		return false, fmt.Errorf("open control: %w", err)
 	}
 	safe.Go(c.log, "control-pong", func() { _ = tunnel.ServePong(ctrl) })
 	c.log.Info("connected to edge", "addr", c.cfg.Edge)
@@ -110,9 +121,9 @@ func (c *Client) connectOnce(ctx context.Context) error {
 	case <-ctx.Done():
 		_ = sess.Close()
 		<-errc
-		return ctx.Err()
+		return true, ctx.Err()
 	case err := <-errc:
-		return err
+		return true, err
 	}
 }
 
@@ -137,13 +148,12 @@ func (c *Client) handleStream(stream net.Conn, meta tunnel.OpenMeta) {
 		return
 	}
 	defer stream.Close()
-	tun, ok := c.cfg.TunnelByName(meta.Name)
-	if !ok {
-		c.log.Warn("unknown tunnel", "name", meta.Name)
-		_ = tunnel.AckData(stream, false, "unknown tunnel")
+	local, err := c.resolveLocal(meta)
+	if err != nil {
+		c.log.Warn("unknown tunnel", "name", meta.Name, "err", err)
+		_ = tunnel.AckData(stream, false, err.Error())
 		return
 	}
-	local := tun.Local
 	if err := proxy.ValidateLocal(local, c.cfg.PrivateOnly()); err != nil {
 		c.log.Warn("local target rejected", "tunnel", meta.Name, "err", err)
 		_ = tunnel.AckData(stream, false, err.Error())
@@ -163,6 +173,26 @@ func (c *Client) handleStream(stream net.Conn, meta tunnel.OpenMeta) {
 	if err := proxy.Relay(stream, conn, c.cfg.IdleOrDefault()); err != nil {
 		c.log.Debug("relay end", "tunnel", meta.Name, "err", err)
 	}
+}
+
+func (c *Client) resolveLocal(meta tunnel.OpenMeta) (string, error) {
+	if !c.cfg.RestrictTunnels() {
+		if strings.TrimSpace(meta.Local) == "" {
+			return "", fmt.Errorf("edge did not send local target")
+		}
+		return meta.Local, nil
+	}
+	tun, ok := c.cfg.TunnelByName(meta.Name)
+	if !ok {
+		return "", fmt.Errorf("unknown tunnel")
+	}
+	if strings.TrimSpace(tun.Local) != "" {
+		return tun.Local, nil
+	}
+	if strings.TrimSpace(meta.Local) == "" {
+		return "", fmt.Errorf("no local target for tunnel %q", meta.Name)
+	}
+	return meta.Local, nil
 }
 
 func nextBackoff(prev time.Duration) time.Duration {

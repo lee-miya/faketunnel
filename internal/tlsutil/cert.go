@@ -124,6 +124,15 @@ func ServerConfig(cert tls.Certificate) *tls.Config {
 	}
 }
 
+// HTTPSConfig builds TLS 1.2+ for the Admin HTTP API (no tunnel ALPN).
+func HTTPSConfig(cert tls.Certificate) *tls.Config {
+	return &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS12,
+		NextProtos:   []string{"http/1.1"},
+	}
+}
+
 // ClientConfig builds a TLS 1.2+ client config.
 func ClientConfig(caPath, serverName string, insecure bool) (*tls.Config, error) {
 	cfg := &tls.Config{

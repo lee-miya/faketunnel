@@ -2,15 +2,19 @@ package admin
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"io"
 	"net"
 	"net/http"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"faketunnel/internal/acl"
+	"faketunnel/internal/ban"
 	"faketunnel/internal/metrics"
+	"faketunnel/internal/tlsutil"
 )
 
 func TestAllowlistCRUD(t *testing.T) {
@@ -127,6 +131,116 @@ func TestAllowlistCRUD(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("want 401 got %d", resp.StatusCode)
+	}
+}
+
+func TestAdminAuthBanAddSelfAndDenylist(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "allowlist.json")
+	list, err := acl.New([]string{"127.0.0.1/32"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := acl.NewStore(list, path, nil)
+	bans := ban.New("", nil)
+	srv, err := New(Config{Listen: "127.0.0.1:0", Token: "secret", Metrics: true, Bans: bans}, store, &metrics.Registry{}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Shutdown()
+	base := "http://" + srv.Addr()
+
+	wrong := func() int {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodGet, base+"/v1/status", nil)
+		req.Header.Set("Authorization", "Bearer wrong-token")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	for i := 0; i < 4; i++ {
+		if code := wrong(); code != http.StatusUnauthorized {
+			t.Fatalf("try %d: want 401 got %d", i+1, code)
+		}
+	}
+	if code := wrong(); code != http.StatusUnauthorized {
+		t.Fatalf("5th want 401 got %d", code)
+	}
+	if code := wrong(); code != http.StatusForbidden {
+		t.Fatalf("banned want 403 got %d", code)
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, base+"/v1/denylist", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || !bytes.Contains(data, []byte("temporary")) {
+		t.Fatalf("denylist=%s status=%d", data, resp.StatusCode)
+	}
+
+	req, _ = http.NewRequest(http.MethodPost, base+"/v1/allowlist/self", bytes.NewReader([]byte("{}")))
+	req.Header.Set("Authorization", "Bearer secret")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("add-self status=%d", resp.StatusCode)
+	}
+	if bans.Blocked(net.ParseIP("127.0.0.1")) && bans.Blocked(net.ParseIP("::1")) {
+		t.Fatal("add-self should unban loopback")
+	}
+}
+
+func TestAdminHTTPS(t *testing.T) {
+	t.Parallel()
+	cert, err := tlsutil.LoadOrGenerate("", "", true, []string{"localhost", "127.0.0.1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	list, _ := acl.New([]string{"127.0.0.1/32"})
+	store := acl.NewStore(list, filepath.Join(t.TempDir(), "a.json"), nil)
+	srv, err := New(Config{
+		Listen: "127.0.0.1:0",
+		Token:  "secret",
+		TLS:    tlsutil.HTTPSConfig(cert),
+	}, store, &metrics.Registry{}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Shutdown()
+
+	cli := &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
+		},
+	}
+	req, _ := http.NewRequest(http.MethodGet, "https://"+srv.Addr()+"/v1/status", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	resp, err := cli.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("https status=%d", resp.StatusCode)
 	}
 }
 

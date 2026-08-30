@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"faketunnel/internal/netutil"
+
 	"gopkg.in/yaml.v3"
 )
 
@@ -29,6 +31,7 @@ type File struct {
 	TLS           TLS      `yaml:"tls"`
 	AllowlistFile string   `yaml:"allowlist_file"`
 	Allowlist     []string `yaml:"allowlist"`
+	DenylistFile  string   `yaml:"denylist_file"`
 	Admin         Admin    `yaml:"admin"`
 	Tunnels       []Tunnel `yaml:"tunnels"`
 
@@ -45,6 +48,7 @@ type File struct {
 
 // Admin is the Edge management HTTP API (optional).
 type Admin struct {
+	Enable    *bool  `yaml:"enable"` // nil = default on for Edge; false disables
 	Listen    string `yaml:"listen"`
 	Token     string `yaml:"token"`
 	TokenFile string `yaml:"token_file"`
@@ -57,7 +61,7 @@ type TLS struct {
 	Key                string `yaml:"key"`
 	CA                 string `yaml:"ca"`
 	ServerName         string `yaml:"server_name"`
-	InsecureSkipVerify bool   `yaml:"insecure_skip_verify"`
+	InsecureSkipVerify *bool  `yaml:"insecure_skip_verify"`
 	AutoSelfSigned     bool   `yaml:"auto_self_signed"`
 }
 
@@ -107,9 +111,67 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
-// Load reads and validates a YAML config file. Relative paths are resolved
-// against the config file directory.
+// Load reads a YAML config file, applies shared defaults (port shorthand,
+// tunnel names/types), and validates common fields. Use LoadEdge / LoadAgent
+// from process entrypoints so role-specific defaults (TLS, Admin, listen) apply.
 func Load(path string) (*File, error) {
+	cfg, err := loadYAML(path)
+	if err != nil {
+		return nil, err
+	}
+	cfg.applyCommon()
+	cfg.resolvePaths(filepath.Dir(cfg.Path))
+	if err := cfg.loadToken(); err != nil {
+		return nil, err
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// LoadEdge loads a config and fills Edge defaults (listen, TLS, Admin, allowlist path).
+func LoadEdge(path string) (*File, error) {
+	cfg, err := loadYAML(path)
+	if err != nil {
+		return nil, err
+	}
+	cfg.applyCommon()
+	if err := cfg.applyEdgeDefaults(); err != nil {
+		return nil, err
+	}
+	cfg.resolvePaths(filepath.Dir(cfg.Path))
+	if err := cfg.loadToken(); err != nil {
+		return nil, err
+	}
+	if err := cfg.ensureAdminToken(); err != nil {
+		return nil, err
+	}
+	if err := cfg.ValidateEdge(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// LoadAgent loads a config and fills Agent defaults (TLS server name / skip-verify).
+func LoadAgent(path string) (*File, error) {
+	cfg, err := loadYAML(path)
+	if err != nil {
+		return nil, err
+	}
+	cfg.applyCommon()
+	cfg.applyAgentDefaults()
+	cfg.resolvePaths(filepath.Dir(cfg.Path))
+	if err := cfg.loadToken(); err != nil {
+		return nil, err
+	}
+	if err := cfg.ValidateAgent(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+func loadYAML(path string) (*File, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return nil, err
@@ -123,20 +185,13 @@ func Load(path string) (*File, error) {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	cfg.Path = abs
-	base := filepath.Dir(abs)
-	cfg.resolvePaths(base)
-	if err := cfg.loadToken(); err != nil {
-		return nil, err
-	}
-	if err := cfg.Validate(); err != nil {
-		return nil, err
-	}
 	return &cfg, nil
 }
 
 func (c *File) resolvePaths(base string) {
 	c.TokenFile = resolve(base, c.TokenFile)
 	c.AllowlistFile = resolve(base, c.AllowlistFile)
+	c.DenylistFile = resolve(base, c.DenylistFile)
 	c.Admin.TokenFile = resolve(base, c.Admin.TokenFile)
 	c.TLS.Cert = resolve(base, c.TLS.Cert)
 	c.TLS.Key = resolve(base, c.TLS.Key)
@@ -155,6 +210,9 @@ func resolve(base, p string) string {
 }
 
 func (c *File) loadToken() error {
+	if tok := strings.TrimSpace(os.Getenv("FAKETUNNEL_TUNNEL_TOKEN")); tok != "" && strings.TrimSpace(c.Token) == "" && c.TokenFile == "" {
+		c.Token = tok
+	}
 	if c.TokenFile != "" {
 		data, err := os.ReadFile(c.TokenFile)
 		if err != nil {
@@ -166,9 +224,15 @@ func (c *File) loadToken() error {
 		}
 		c.Token = tok
 	}
+	if tok := strings.TrimSpace(os.Getenv("FAKETUNNEL_ADMIN_TOKEN")); tok != "" && strings.TrimSpace(c.Admin.Token) == "" && c.Admin.TokenFile == "" {
+		c.Admin.Token = tok
+	}
 	if c.Admin.TokenFile != "" {
 		data, err := os.ReadFile(c.Admin.TokenFile)
 		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
 			return fmt.Errorf("read admin.token_file: %w", err)
 		}
 		tok := strings.TrimSpace(string(data))
@@ -234,6 +298,9 @@ func (c *File) ValidateEdge() error {
 		if strings.TrimSpace(c.AllowlistFile) == "" {
 			return fmt.Errorf("allowlist_file is required when admin.listen is set")
 		}
+		if err := c.validatePublicAdmin(); err != nil {
+			return err
+		}
 	}
 	publicTCP := make(map[string]struct{})
 	publicUDP := make(map[string]struct{})
@@ -288,6 +355,9 @@ func (c *File) ValidateEdge() error {
 		if t.Passthrough && !t.TLS {
 			return fmt.Errorf("tunnel %q: passthrough requires tls: true", t.Name)
 		}
+		if t.HTTP2 && !t.TLS {
+			return fmt.Errorf("tunnel %q: http2 requires tls: true", t.Name)
+		}
 		if t.TLS && !t.Passthrough {
 			hasPair := (t.Cert != "" && t.Key != "") || (c.TLS.Cert != "" && c.TLS.Key != "") || c.TLS.AutoSelfSigned
 			if !hasPair {
@@ -316,6 +386,23 @@ func (c *File) ValidateEdge() error {
 	return nil
 }
 
+func (c *File) validatePublicAdmin() error {
+	if netutil.ListenHostIsLoopback(c.Admin.Listen) {
+		return nil
+	}
+	tok := strings.TrimSpace(c.Admin.Token)
+	if tok == ExampleAdminToken {
+		return fmt.Errorf("admin token is the example placeholder; generate a random token before binding admin.listen to a public address")
+	}
+	if len(tok) < MinPublicAdminToken {
+		return fmt.Errorf("admin token must be at least %d characters when admin.listen is not loopback", MinPublicAdminToken)
+	}
+	if tok == strings.TrimSpace(c.Token) {
+		return fmt.Errorf("admin token must differ from the tunnel token")
+	}
+	return nil
+}
+
 func normalizeConfigHost(host string) string {
 	host = strings.TrimSpace(host)
 	if host == "" {
@@ -335,15 +422,13 @@ func (c *File) ValidateAgent() error {
 	if strings.TrimSpace(c.Edge) == "" {
 		return fmt.Errorf("edge is required for agent")
 	}
-	for _, t := range c.Tunnels {
-		switch t.Type {
-		case TypeTCP, TypeHTTP, TypeUDP:
-			if strings.TrimSpace(t.Local) == "" {
-				return fmt.Errorf("tunnel %q: local is required", t.Name)
-			}
-		}
-	}
+	// tunnels may be omitted: Agent then dials the local target sent by Edge.
 	return nil
+}
+
+// RestrictTunnels reports whether the Agent config lists tunnels as an allowlist.
+func (c *File) RestrictTunnels() bool {
+	return len(c.Tunnels) > 0
 }
 
 // TunnelByName returns a tunnel definition by name.
@@ -458,7 +543,20 @@ func (c *File) LogFormatOrDefault() string {
 
 // AdminEnabled reports whether the management API should start.
 func (c *File) AdminEnabled() bool {
+	if c.Admin.Enable != nil && !*c.Admin.Enable {
+		return false
+	}
 	return strings.TrimSpace(c.Admin.Listen) != ""
+}
+
+// SkipVerify reports whether Agent should skip TLS certificate verification.
+// Default is true when tls.ca is unset (self-signed tunnel certs just work);
+// set tls.ca and insecure_skip_verify: false for production.
+func (c *File) SkipVerify() bool {
+	if c.TLS.InsecureSkipVerify != nil {
+		return *c.TLS.InsecureSkipVerify
+	}
+	return strings.TrimSpace(c.TLS.CA) == ""
 }
 
 // AdminMetricsOrDefault enables /metrics on the admin port (default true).

@@ -14,7 +14,10 @@ coverage.out
 *.pem
 *.key
 configs/certs/
+configs/**/certs/
 configs/local/
+configs/**/admin.token
+configs/**/token
 !configs/examples/
 
 # 编辑器 / 代理记忆

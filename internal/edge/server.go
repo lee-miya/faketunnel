@@ -11,6 +11,7 @@ import (
 
 	"faketunnel/internal/acl"
 	"faketunnel/internal/admin"
+	"faketunnel/internal/ban"
 	"faketunnel/internal/config"
 	"faketunnel/internal/metrics"
 	"faketunnel/internal/netutil"
@@ -25,8 +26,10 @@ type Server struct {
 	cfg   *config.File
 	store *acl.Store
 	acl   *acl.List
+	bans  *ban.Store
 	log   *slog.Logger
 	tls   *tls.Config
+	cert  tls.Certificate
 	reg   *metrics.Registry
 
 	mu       sync.RWMutex
@@ -37,6 +40,8 @@ type Server struct {
 	udpPC    map[string]net.PacketConn
 	udpMu    sync.Mutex
 	udpHubs  map[string]*udpHub
+	tcpMu    sync.Mutex
+	tcpConns map[net.Conn]struct{}
 	sem      chan struct{}
 	wg       sync.WaitGroup
 
@@ -62,6 +67,7 @@ func New(cfg *config.File, list *acl.List, log *slog.Logger) (*Server, error) {
 		cfg:    cfg,
 		store:  store,
 		acl:    list,
+		bans:   ban.New(cfg.DenylistFile, log),
 		log:    log,
 		reg:    &metrics.Registry{},
 		public: make(map[string]net.Listener),
@@ -71,6 +77,9 @@ func New(cfg *config.File, list *acl.List, log *slog.Logger) (*Server, error) {
 
 // Store returns the hot-updatable allowlist store.
 func (s *Server) Store() *acl.Store { return s.store }
+
+// Bans returns the IP strike/ban store.
+func (s *Server) Bans() *ban.Store { return s.bans }
 
 // Metrics returns the runtime metrics registry.
 func (s *Server) Metrics() *metrics.Registry { return s.reg }
@@ -90,6 +99,11 @@ func (s *Server) Start(ctx context.Context) error {
 		return err
 	}
 	s.tls = tlsutil.ServerConfig(cert)
+	s.cert = cert
+
+	if s.cfg.Token == "dev-token-change-me" {
+		s.log.Warn("using example tunnel token; replace before exposing Edge on a public network")
+	}
 
 	ln, err := net.Listen("tcp", s.cfg.Listen)
 	if err != nil {
@@ -143,11 +157,17 @@ func (s *Server) startAdmin() error {
 	if !s.cfg.AdminEnabled() {
 		return nil
 	}
-	adm, err := admin.New(admin.Config{
+	cfg := admin.Config{
 		Listen:  s.cfg.Admin.Listen,
 		Token:   s.cfg.Admin.Token,
 		Metrics: s.cfg.AdminMetricsOrDefault(),
-	}, s.store, s.reg, s.reg.Snapshot, s.log)
+		Bans:    s.bans,
+	}
+	public := !netutil.ListenHostIsLoopback(s.cfg.Admin.Listen)
+	if public {
+		cfg.TLS = tlsutil.HTTPSConfig(s.cert)
+	}
+	adm, err := admin.New(cfg, s.store, s.reg, s.status, s.log)
 	if err != nil {
 		return err
 	}
@@ -155,7 +175,19 @@ func (s *Server) startAdmin() error {
 		return err
 	}
 	s.admin = adm
+	if public {
+		s.log.Warn("admin is on a non-loopback address; use HTTPS and keep the Bearer token secret")
+	}
+	if s.cfg.Admin.Token == config.ExampleAdminToken {
+		s.log.Warn("using example admin token; replace before production")
+	}
 	return nil
+}
+
+func (s *Server) status() metrics.Status {
+	st := s.reg.Snapshot()
+	st.TempBans, st.PermanentBans = s.bans.Counts()
+	return st
 }
 
 // Run starts listeners and blocks until ctx is cancelled.
@@ -173,6 +205,7 @@ func (s *Server) Shutdown() error {
 		_ = s.admin.Shutdown()
 	}
 	s.shutdownHTTP()
+	s.closeTCPConns()
 	s.closeUDPHubs()
 	_ = s.closeListeners()
 	s.mu.Lock()
@@ -195,6 +228,28 @@ func (s *Server) Shutdown() error {
 	}
 	s.log.Info("edge stopped")
 	return nil
+}
+
+func (s *Server) trackTCP(c net.Conn, add bool) {
+	s.tcpMu.Lock()
+	defer s.tcpMu.Unlock()
+	if s.tcpConns == nil {
+		s.tcpConns = make(map[net.Conn]struct{})
+	}
+	if add {
+		s.tcpConns[c] = struct{}{}
+	} else {
+		delete(s.tcpConns, c)
+	}
+}
+
+func (s *Server) closeTCPConns() {
+	s.tcpMu.Lock()
+	defer s.tcpMu.Unlock()
+	for c := range s.tcpConns {
+		_ = c.Close()
+	}
+	s.tcpConns = nil
 }
 
 func (s *Server) closeListeners() error {
@@ -340,9 +395,13 @@ func (s *Server) servePublic(ctx context.Context, tun config.Tunnel, ln net.List
 			s.log.Warn("proxy protocol", "err", err)
 			continue
 		}
+		s.trackTCP(conn, true)
 		s.wg.Add(1)
 		safe.Go(s.log, "public-conn", func() {
-			defer s.wg.Done()
+			defer func() {
+				s.trackTCP(conn, false)
+				s.wg.Done()
+			}()
 			s.handlePublic(tun, conn)
 		})
 	}
@@ -351,13 +410,7 @@ func (s *Server) servePublic(ctx context.Context, tun config.Tunnel, ln net.List
 func (s *Server) handlePublic(tun config.Tunnel, conn net.Conn) {
 	defer func() { _ = conn.Close() }()
 	ip := netutil.IPFromConn(conn)
-	if !s.acl.Allow(ip) {
-		ipStr := ""
-		if ip != nil {
-			ipStr = ip.String()
-		}
-		s.reg.IncDeny()
-		s.log.Warn("acl deny", "ip", ipStr, "tunnel", tun.Name)
+	if !s.publicAllowed(ip, "tcp", tun.Name) {
 		netutil.CloseReset(conn)
 		return
 	}
@@ -389,4 +442,28 @@ func (s *Server) handlePublic(tun config.Tunnel, conn net.Conn) {
 	if err := proxy.Relay(conn, stream, s.cfg.IdleOrDefault()); err != nil {
 		s.log.Debug("relay end", "tunnel", tun.Name, "err", err)
 	}
+}
+
+func (s *Server) publicAllowed(ip net.IP, proto, tunnel string) bool {
+	if s.bans != nil && s.bans.Blocked(ip) {
+		s.reg.IncDeny()
+		ipStr := ""
+		if ip != nil {
+			ipStr = ip.String()
+		}
+		s.log.Debug("ip banned", "ip", ipStr, "proto", proto, "tunnel", tunnel, "kind", s.bans.Kind(ip))
+		return false
+	}
+	if s.acl.Allow(ip) {
+		s.bans.ObserveValid(ip)
+		return true
+	}
+	s.reg.IncDeny()
+	ipStr := ""
+	if ip != nil {
+		ipStr = ip.String()
+	}
+	s.log.Warn("acl deny", "ip", ipStr, "proto", proto, "tunnel", tunnel)
+	s.bans.ObserveInvalid(ip, "acl")
+	return false
 }

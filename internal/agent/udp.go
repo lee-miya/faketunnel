@@ -37,13 +37,12 @@ type udpLocalAssoc struct {
 
 func (c *Client) handleUDPStream(stream net.Conn, meta tunnel.OpenMeta) {
 	defer stream.Close()
-	tun, ok := c.cfg.TunnelByName(meta.Name)
-	if !ok {
-		c.log.Warn("unknown tunnel", "name", meta.Name)
-		_ = tunnel.AckData(stream, false, "unknown tunnel")
+	local, err := c.resolveLocal(meta)
+	if err != nil {
+		c.log.Warn("unknown tunnel", "name", meta.Name, "err", err)
+		_ = tunnel.AckData(stream, false, err.Error())
 		return
 	}
-	local := tun.Local
 	if err := proxy.ValidateLocal(local, c.cfg.PrivateOnly()); err != nil {
 		c.log.Warn("local target rejected", "tunnel", meta.Name, "err", err)
 		_ = tunnel.AckData(stream, false, err.Error())
