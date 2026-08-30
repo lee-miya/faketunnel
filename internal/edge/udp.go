@@ -97,6 +97,7 @@ func (s *Server) serveUDP(ctx context.Context, tun config.Tunnel, pc net.PacketC
 			if ua.IP != nil {
 				ipStr = ua.IP.String()
 			}
+			s.reg.IncDeny()
 			s.log.Warn("acl deny", "ip", ipStr, "tunnel", tun.Name, "proto", "udp")
 			continue
 		}
@@ -280,13 +281,16 @@ func (h *udpHub) markReady(id uint32, ok bool, msg string) {
 		h.failAssoc(a, fmt.Errorf("%s", msg))
 		return
 	}
-	a.err = nil
 	select {
 	case <-a.ready:
+		h.mu.Unlock()
+		return
 	default:
+		a.err = nil
 		close(a.ready)
 	}
 	h.mu.Unlock()
+	h.s.reg.AddSessions(1)
 }
 
 func (h *udpHub) readLoop() {
@@ -347,13 +351,18 @@ func (h *udpHub) removeAssoc(id uint32, notify bool) {
 	if a.client != nil {
 		delete(h.byAddr, a.client.String())
 	}
+	wasReady := false
 	select {
 	case <-a.ready:
+		wasReady = a.err == nil
 	default:
 		a.err = fmt.Errorf("assoc closed")
 		close(a.ready)
 	}
 	h.mu.Unlock()
+	if wasReady {
+		h.s.reg.AddSessions(-1)
+	}
 	if notify {
 		ca, _ := (tunnel.CloseAssoc{ID: id}).Marshal()
 		_ = h.writeFrame(tunnel.TypeCloseAssoc, ca)
@@ -417,9 +426,13 @@ func (h *udpHub) close() {
 	}
 	h.closed = true
 	close(h.doneCh)
+	var live int64
 	for id, a := range h.byID {
 		select {
 		case <-a.ready:
+			if a.err == nil {
+				live++
+			}
 		default:
 			a.err = fmt.Errorf("hub closed")
 			close(a.ready)
@@ -430,6 +443,9 @@ func (h *udpHub) close() {
 		}
 	}
 	h.mu.Unlock()
+	if live > 0 {
+		h.s.reg.AddSessions(-live)
+	}
 	_ = h.stream.Close()
 	h.s.udpMu.Lock()
 	if h.s.udpHubs[h.tun.Name] == h {

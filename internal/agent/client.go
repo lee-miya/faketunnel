@@ -99,7 +99,7 @@ func (c *Client) connectOnce(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("open control: %w", err)
 	}
-	safe.Go(c.log, "control-ping", func() { _ = tunnel.RunPing(ctrl, 0) })
+	safe.Go(c.log, "control-pong", func() { _ = tunnel.ServePong(ctrl) })
 	c.log.Info("connected to edge", "addr", c.cfg.Edge)
 
 	errc := make(chan error, 1)

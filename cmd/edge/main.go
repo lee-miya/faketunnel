@@ -20,7 +20,7 @@ func main() {
 	configPath := flag.String("config", "", "path to edge YAML config")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "myTunnel Edge — 公网入口（TLS 隧道 + TCP/HTTP 转发 + IP allowlist）\n\n")
+		fmt.Fprintf(os.Stderr, "myTunnel Edge — 公网入口（TLS 隧道 + TCP/HTTP/UDP + IP allowlist + Admin）\n\n")
 		fmt.Fprintf(os.Stderr, "用法: edge -config path/to/edge.yaml\n\n")
 		flag.PrintDefaults()
 	}

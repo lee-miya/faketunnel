@@ -1,14 +1,17 @@
-# myTunnel 架构（Phase 1–3）
+# myTunnel 架构（Phase 1–4）
 
 ## 角色
 
 - **Edge**：跑在公网 VPS。监听 Agent 隧道口（TLS）以及各 TCP / HTTP(S) / UDP 公网端口。入站连接先做 IP allowlist，命中后经 yamux 交给 Agent。
 - **Agent**：只出站连接 Edge（NAT/防火墙友好）。按 tunnel name 把流/关联拨到本机 `local` 目标。
-- **Allowlist**：Edge 本地 JSON 文件 + 内存原子替换。Phase 1 启动加载；远程热更新属于 Phase 4。
+- **Allowlist**：Edge 本地 JSON 文件 + 内存原子替换；Admin API / CLI 写盘后立即生效，无需重启。
+- **Admin**：独立 HTTP 管理口（Bearer token）；可热改 allowlist、查看状态与 Prometheus 指标。
 
 ```
 Internet client --TCP/HTTP(S)/UDP--> Edge --TLS+yamux--> Agent --TCP/UDP--> 127.0.0.1:...
                  ACL deny → RST/关闭/丢弃（HTTP 可回 403）
+
+Admin CLI/API --Bearer--> Edge admin port → allowlist.json + in-memory Replace
 ```
 
 ## 安全模型
@@ -17,10 +20,11 @@ Internet client --TCP/HTTP(S)/UDP--> Edge --TLS+yamux--> Agent --TCP/UDP--> 127.
 |---|---|
 | 隧道身份 | Agent 在 TLS 之后发送预共享 token；失败不进入 yamux |
 | 访问控制 | 取 `RemoteAddr`（可选 PROXY protocol v1）；默认 deny |
+| 管理面 | Admin 独立 `listen` + Bearer；建议仅本机或 SSH 转发；审计日志记录 actor/动作/CIDR |
 | 传输 | 隧道 TLS 1.2+，ALPN `mytunnel/1`；公网 HTTPS 终止另用独立证书（无 mytunnel ALPN） |
 | 最小暴露 | Agent 无入站端口；本地目标默认仅回环 / RFC1918 / ULA |
 
-Token 使用 SHA-256 后恒定时间比较，日志不记录 token。
+Token 使用 SHA-256 后恒定时间比较，日志不记录 token。Admin token 与隧道 token 分离。
 
 ## 隧道协议
 
@@ -41,12 +45,12 @@ TLS 握手完成后，先走自定义 **8 字节头 + payload** 帧（版本字�
 
 成功后该连接升级为 **yamux**：
 
-- Agent 打开第一条 stream 作为 control：`Ping` / `Pong`（15s / 45s 超时）
+- Agent 打开第一条 stream 作为 control；**Edge 发 `Ping`，Agent 回 `Pong`**（15s / 45s 超时），Edge 据此统计隧道 RTT
 - 每条公网 TCP 连接 / HTTP 请求对应一条 yamux data stream：`OpenStream` → `OpenStreamAck` → 原始字节双向拷贝
   - `ProtoTCP` / `ProtoHTTP`（Agent 均 dial `local` 后 relay）
 - 每个 UDP 隧道对应一条专用 yamux stream（`ProtoUDP`）：其上复用 `OpenAssoc` / `OpenAssocAck` / `Datagram` / `CloseAssoc`（带 assoc id），避免每包开 stream
 
-未实现（为后续阶段保留）：`CloseStream`、`ConfigPush`。
+未实现（可后续扩展）：`CloseStream`、`ConfigPush`。
 
 ## HTTP/HTTPS（Phase 2）
 
@@ -70,7 +74,7 @@ TLS 握手完成后，先走自定义 **8 字节头 + payload** 帧（版本字�
 - 背压：hub stream 写失败时关闭对应 assoc；过大包直接丢弃并打日志。
 - 与 TCP/HTTP 相同端口号可共存（协议不同）；同一 `public` 不可挂两个 UDP 隧道。
 
-## Allowlist 文件
+## Allowlist 与 Admin（Phase 4）
 
 `allowlist.json`：
 
@@ -82,7 +86,28 @@ TLS 握手完成后，先走自定义 **8 字节头 + payload** 帧（版本字�
 
 也接受 JSON 数组。裸 IP 视为 `/32` 或 `/128`。IPv4-mapped IPv6 会规范成 IPv4 再匹配。
 
-文件存在时忽略 YAML 里的 `allowlist`。更新文件后 **需重启 Edge**（进程内 `Replace` 已就绪，供 Phase 4 API）。
+文件存在时忽略 YAML 里的 `allowlist`。Admin / CLI 变更路径：
+
+1. 校验 CIDR → 内存 `Replace` / `Add` / `Remove`
+2. 临时文件 + `rename` 写盘
+3. `slog` 审计：`action`、`actor`、`cidrs`、`entries`
+
+启用 `admin.listen` 时必须配置 `admin.token`（或 `token_file`）与 `allowlist_file`。
+
+API：`GET/PUT/POST/DELETE /v1/allowlist`，`GET /v1/status`，可选 `GET /metrics`。
+
+CLI：`mytunnel allowlist list|add|rm|set`、`mytunnel status`（`-admin` / `-token` 或环境变量 `MYTUNNEL_ADMIN` / `MYTUNNEL_TOKEN`）。
+
+## 指标
+
+Prometheus 文本（Admin 口，需 Bearer）：
+
+| 指标 | 类型 | 含义 |
+|------|------|------|
+| `mytunnel_agent_connected` | gauge | Agent 是否在线 |
+| `mytunnel_active_sessions` | gauge | TCP/HTTP 会话 + 就绪 UDP assoc |
+| `mytunnel_acl_denies_total` | counter | allowlist 拒绝次数 |
+| `mytunnel_tunnel_rtt_seconds` | gauge | 最近一次 control Ping/Pong RTT |
 
 ## 运行时
 
@@ -94,5 +119,5 @@ TLS 握手完成后，先走自定义 **8 字节头 + payload** 帧（版本字�
 
 ## 尚未实现
 
-- Admin API / CLI 热更新
 - 多租户、IdP、Windows 服务
+- 完整 Prometheus client 库 / 直方图分位（当前为轻量文本导出）

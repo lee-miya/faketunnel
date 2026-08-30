@@ -29,6 +29,7 @@ type File struct {
 	TLS           TLS      `yaml:"tls"`
 	AllowlistFile string   `yaml:"allowlist_file"`
 	Allowlist     []string `yaml:"allowlist"`
+	Admin         Admin    `yaml:"admin"`
 	Tunnels       []Tunnel `yaml:"tunnels"`
 
 	IdleTimeout      Duration `yaml:"idle_timeout"`
@@ -40,6 +41,14 @@ type File struct {
 	ProxyProtocol    bool     `yaml:"proxy_protocol"`
 	LocalPrivateOnly *bool    `yaml:"local_private_only"`
 	HealthPath       string   `yaml:"health_path"`
+}
+
+// Admin is the Edge management HTTP API (optional).
+type Admin struct {
+	Listen    string `yaml:"listen"`
+	Token     string `yaml:"token"`
+	TokenFile string `yaml:"token_file"`
+	Metrics   *bool  `yaml:"metrics"` // default true when listen is set
 }
 
 // TLS holds certificate settings for the tunnel.
@@ -126,6 +135,7 @@ func Load(path string) (*File, error) {
 func (c *File) resolvePaths(base string) {
 	c.TokenFile = resolve(base, c.TokenFile)
 	c.AllowlistFile = resolve(base, c.AllowlistFile)
+	c.Admin.TokenFile = resolve(base, c.Admin.TokenFile)
 	c.TLS.Cert = resolve(base, c.TLS.Cert)
 	c.TLS.Key = resolve(base, c.TLS.Key)
 	c.TLS.CA = resolve(base, c.TLS.CA)
@@ -143,18 +153,28 @@ func resolve(base, p string) string {
 }
 
 func (c *File) loadToken() error {
-	if c.TokenFile == "" {
-		return nil
+	if c.TokenFile != "" {
+		data, err := os.ReadFile(c.TokenFile)
+		if err != nil {
+			return fmt.Errorf("read token_file: %w", err)
+		}
+		tok := strings.TrimSpace(string(data))
+		if tok == "" {
+			return fmt.Errorf("token_file is empty")
+		}
+		c.Token = tok
 	}
-	data, err := os.ReadFile(c.TokenFile)
-	if err != nil {
-		return fmt.Errorf("read token_file: %w", err)
+	if c.Admin.TokenFile != "" {
+		data, err := os.ReadFile(c.Admin.TokenFile)
+		if err != nil {
+			return fmt.Errorf("read admin.token_file: %w", err)
+		}
+		tok := strings.TrimSpace(string(data))
+		if tok == "" {
+			return fmt.Errorf("admin.token_file is empty")
+		}
+		c.Admin.Token = tok
 	}
-	tok := strings.TrimSpace(string(data))
-	if tok == "" {
-		return fmt.Errorf("token_file is empty")
-	}
-	c.Token = tok
 	return nil
 }
 
@@ -204,6 +224,14 @@ func (c *File) ValidateEdge() error {
 	}
 	if hp := strings.TrimSpace(c.HealthPath); hp != "" && !strings.HasPrefix(hp, "/") {
 		return fmt.Errorf("health_path must start with /")
+	}
+	if strings.TrimSpace(c.Admin.Listen) != "" {
+		if strings.TrimSpace(c.Admin.Token) == "" {
+			return fmt.Errorf("admin.token is required when admin.listen is set")
+		}
+		if strings.TrimSpace(c.AllowlistFile) == "" {
+			return fmt.Errorf("allowlist_file is required when admin.listen is set")
+		}
 	}
 	publicTCP := make(map[string]struct{})
 	publicUDP := make(map[string]struct{})
@@ -421,4 +449,17 @@ func (c *File) LogFormatOrDefault() string {
 		return "text"
 	}
 	return c.LogFormat
+}
+
+// AdminEnabled reports whether the management API should start.
+func (c *File) AdminEnabled() bool {
+	return strings.TrimSpace(c.Admin.Listen) != ""
+}
+
+// AdminMetricsOrDefault enables /metrics on the admin port (default true).
+func (c *File) AdminMetricsOrDefault() bool {
+	if c.Admin.Metrics == nil {
+		return true
+	}
+	return *c.Admin.Metrics
 }

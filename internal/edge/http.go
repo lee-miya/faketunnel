@@ -185,6 +185,7 @@ func (s *Server) httpHandler(hl *httpListener) http.Handler {
 			if ip != nil {
 				ipStr = ip.String()
 			}
+			s.reg.IncDeny()
 			s.log.Warn("acl deny", "ip", ipStr, "proto", "http")
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
@@ -219,6 +220,9 @@ func (s *Server) httpHandler(hl *httpListener) http.Handler {
 			http.Error(w, "no agent", http.StatusBadGateway)
 			return
 		}
+
+		s.reg.AddSessions(1)
+		defer s.reg.AddSessions(-1)
 
 		rp := &httputil.ReverseProxy{
 			Director: func(req *http.Request) {

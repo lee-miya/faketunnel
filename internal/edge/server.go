@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"mytunnel/internal/acl"
+	"mytunnel/internal/admin"
 	"mytunnel/internal/config"
+	"mytunnel/internal/metrics"
 	"mytunnel/internal/netutil"
 	"mytunnel/internal/proxy"
 	"mytunnel/internal/safe"
@@ -20,10 +22,12 @@ import (
 
 // Server is the public-side Edge process.
 type Server struct {
-	cfg *config.File
-	acl *acl.List
-	log *slog.Logger
-	tls *tls.Config
+	cfg   *config.File
+	store *acl.Store
+	acl   *acl.List
+	log   *slog.Logger
+	tls   *tls.Config
+	reg   *metrics.Registry
 
 	mu       sync.RWMutex
 	sess     *tunnel.Session
@@ -35,6 +39,8 @@ type Server struct {
 	udpHubs  map[string]*udpHub
 	sem      chan struct{}
 	wg       sync.WaitGroup
+
+	admin *admin.Server
 }
 
 // New constructs a server. Call Start or Run to listen.
@@ -51,13 +57,30 @@ func New(cfg *config.File, list *acl.List, log *slog.Logger) (*Server, error) {
 	if log == nil {
 		log = slog.Default()
 	}
+	store := acl.NewStore(list, cfg.AllowlistFile, log)
 	return &Server{
 		cfg:    cfg,
+		store:  store,
 		acl:    list,
 		log:    log,
+		reg:    &metrics.Registry{},
 		public: make(map[string]net.Listener),
 		sem:    make(chan struct{}, cfg.MaxSessionsOrDefault()),
 	}, nil
+}
+
+// Store returns the hot-updatable allowlist store.
+func (s *Server) Store() *acl.Store { return s.store }
+
+// Metrics returns the runtime metrics registry.
+func (s *Server) Metrics() *metrics.Registry { return s.reg }
+
+// AdminAddr returns the bound Admin API address (empty if disabled).
+func (s *Server) AdminAddr() string {
+	if s.admin == nil {
+		return ""
+	}
+	return s.admin.Addr()
 }
 
 // Start opens listeners and accept loops. It returns once they are bound.
@@ -103,12 +126,35 @@ func (s *Server) Start(ctx context.Context) error {
 	if err := s.startUDP(ctx); err != nil {
 		return err
 	}
+	if err := s.startAdmin(); err != nil {
+		_ = s.closeListeners()
+		return err
+	}
 
 	s.wg.Add(1)
 	safe.Go(s.log, "tunnel-accept", func() {
 		defer s.wg.Done()
 		s.serveTunnel(ctx)
 	})
+	return nil
+}
+
+func (s *Server) startAdmin() error {
+	if !s.cfg.AdminEnabled() {
+		return nil
+	}
+	adm, err := admin.New(admin.Config{
+		Listen:  s.cfg.Admin.Listen,
+		Token:   s.cfg.Admin.Token,
+		Metrics: s.cfg.AdminMetricsOrDefault(),
+	}, s.store, s.reg, s.reg.Snapshot, s.log)
+	if err != nil {
+		return err
+	}
+	if err := adm.Start(); err != nil {
+		return err
+	}
+	s.admin = adm
 	return nil
 }
 
@@ -123,6 +169,9 @@ func (s *Server) Run(ctx context.Context) error {
 
 // Shutdown stops listeners, closes the agent session, and drains handlers.
 func (s *Server) Shutdown() error {
+	if s.admin != nil {
+		_ = s.admin.Shutdown()
+	}
 	s.shutdownHTTP()
 	s.closeUDPHubs()
 	_ = s.closeListeners()
@@ -133,6 +182,7 @@ func (s *Server) Shutdown() error {
 	if sess != nil {
 		_ = sess.Close()
 	}
+	s.reg.SetAgentConnected(false)
 	done := make(chan struct{})
 	go func() {
 		s.wg.Wait()
@@ -195,6 +245,7 @@ func (s *Server) setSession(sess *tunnel.Session) {
 	if old != nil && old != sess {
 		_ = old.Close()
 	}
+	s.reg.SetAgentConnected(true)
 	s.log.Info("agent session ready")
 	safe.Go(s.log, "session-watch", func() {
 		<-sess.CloseChan()
@@ -204,6 +255,7 @@ func (s *Server) setSession(sess *tunnel.Session) {
 		}
 		s.mu.Unlock()
 		s.closeUDPHubs()
+		s.reg.SetAgentConnected(false)
 		s.log.Info("agent disconnected")
 	})
 }
@@ -259,7 +311,13 @@ func (s *Server) handleAgent(conn net.Conn) {
 		s.log.Warn("control stream", "err", err)
 		return
 	}
-	safe.Go(s.log, "control-pong", func() { _ = tunnel.ServePong(ctrl) })
+	// Edge initiates Ping so RTT is measured where metrics live.
+	safe.Go(s.log, "control-ping", func() {
+		_ = tunnel.RunPing(ctrl, 0, func(rtt time.Duration) {
+			s.reg.ObserveRTT(rtt)
+			s.log.Debug("tunnel rtt", "rtt", rtt.String())
+		})
+	})
 	s.log.Info("agent connected", "agent_id", agentID, "remote", conn.RemoteAddr().String())
 	s.setSession(sess)
 	<-sess.CloseChan()
@@ -298,6 +356,7 @@ func (s *Server) handlePublic(tun config.Tunnel, conn net.Conn) {
 		if ip != nil {
 			ipStr = ip.String()
 		}
+		s.reg.IncDeny()
 		s.log.Warn("acl deny", "ip", ipStr, "tunnel", tun.Name)
 		netutil.CloseReset(conn)
 		return
@@ -324,6 +383,8 @@ func (s *Server) handlePublic(tun config.Tunnel, conn net.Conn) {
 		s.log.Warn("open stream", "tunnel", tun.Name, "err", err)
 		return
 	}
+	s.reg.AddSessions(1)
+	defer s.reg.AddSessions(-1)
 	s.log.Info("tcp session", "tunnel", tun.Name, "client", conn.RemoteAddr().String())
 	if err := proxy.Relay(conn, stream, s.cfg.IdleOrDefault()); err != nil {
 		s.log.Debug("relay end", "tunnel", tun.Name, "err", err)

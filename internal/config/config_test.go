@@ -173,14 +173,26 @@ func TestValidateEdgeUDP(t *testing.T) {
 	}
 }
 
-func TestUDPIdleDefault(t *testing.T) {
+func TestValidateEdgeAdminRequiresTokenAndAllowlistFile(t *testing.T) {
 	t.Parallel()
-	cfg := &File{}
-	if cfg.UDPIdleOrDefault() != 60*time.Second {
-		t.Fatalf("default=%s", cfg.UDPIdleOrDefault())
+	cfg := &File{
+		Listen: ":8443",
+		Token:  "x",
+		TLS:    TLS{AutoSelfSigned: true},
+		Admin:  Admin{Listen: "127.0.0.1:9090"},
 	}
-	cfg.IdleTimeout = Duration(5 * time.Second)
-	if cfg.UDPIdleOrDefault() != 5*time.Second {
-		t.Fatalf("idle=%s", cfg.UDPIdleOrDefault())
+	if err := cfg.ValidateEdge(); err == nil {
+		t.Fatal("expected admin.token error")
+	}
+	cfg.Admin.Token = "admin"
+	if err := cfg.ValidateEdge(); err == nil {
+		t.Fatal("expected allowlist_file error")
+	}
+	cfg.AllowlistFile = "allowlist.json"
+	if err := cfg.ValidateEdge(); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.AdminEnabled() || !cfg.AdminMetricsOrDefault() {
+		t.Fatal("admin defaults")
 	}
 }

@@ -165,27 +165,31 @@ func ServePong(stream net.Conn) error {
 	}
 }
 
-// RunPing sends Ping frames and waits for Pong until ctx-equivalent close.
-func RunPing(stream net.Conn, interval time.Duration) error {
+// PingObserver is called after each successful Ping/Pong round-trip.
+type PingObserver func(rtt time.Duration)
+
+// RunPing sends Ping frames and waits for Pong until the stream fails.
+func RunPing(stream net.Conn, interval time.Duration, obs PingObserver) error {
 	defer stream.Close()
 	if interval <= 0 {
 		interval = PingInterval
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	if err := sendPingWaitPong(stream); err != nil {
+	if err := sendPingWaitPong(stream, obs); err != nil {
 		return err
 	}
 	for range ticker.C {
-		if err := sendPingWaitPong(stream); err != nil {
+		if err := sendPingWaitPong(stream, obs); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func sendPingWaitPong(stream net.Conn) error {
-	nsec := time.Now().UnixNano()
+func sendPingWaitPong(stream net.Conn, obs PingObserver) error {
+	start := time.Now()
+	nsec := start.UnixNano()
 	_ = stream.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	if err := WriteFrame(stream, TypePing, PingPayload(nsec)); err != nil {
 		return err
@@ -197,6 +201,9 @@ func sendPingWaitPong(stream net.Conn) error {
 	}
 	if fr.Type != TypePong {
 		return fmt.Errorf("expected Pong, got %s", fr.Type)
+	}
+	if obs != nil {
+		obs(time.Since(start))
 	}
 	return nil
 }
