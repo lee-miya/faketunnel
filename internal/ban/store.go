@@ -33,13 +33,14 @@ type fileDTO struct {
 
 // Store tracks consecutive invalid events per IP and persists bans.
 type Store struct {
-	mu    sync.Mutex
-	path  string
-	log   *slog.Logger
-	now   func() time.Time
-	ttl   time.Duration
-	limit int
-	byIP  map[string]*record
+	mu        sync.Mutex
+	path      string
+	log       *slog.Logger
+	now       func() time.Time
+	ttl       time.Duration
+	limit     int
+	byIP      map[string]*record
+	onChanges []func()
 }
 
 // New loads denylist from path (missing file is empty). Empty path is memory-only.
@@ -113,6 +114,28 @@ func (s *Store) Kind(ip net.IP) string {
 	return ""
 }
 
+// OnChange registers a hook called whenever bans are added or removed.
+func (s *Store) OnChange(fn func()) {
+	if s == nil || fn == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onChanges = append(s.onChanges, fn)
+}
+
+func (s *Store) notify() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	fns := append([]func(){}, s.onChanges...)
+	s.mu.Unlock()
+	for _, fn := range fns {
+		fn()
+	}
+}
+
 // ObserveInvalid records an invalid event. Already-banned IPs are ignored.
 // On the 5th consecutive invalid, a temp (6h) or permanent ban is issued.
 func (s *Store) ObserveInvalid(ip net.IP, reason string) {
@@ -124,9 +147,9 @@ func (s *Store) ObserveInvalid(ip net.IP, reason string) {
 		return
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	now := s.now()
 	if s.blockedLocked(key, now) {
+		s.mu.Unlock()
 		return
 	}
 	r := s.byIP[key]
@@ -140,6 +163,7 @@ func (s *Store) ObserveInvalid(ip net.IP, reason string) {
 	}
 	r.Consecutive++
 	if r.Consecutive < s.limit {
+		s.mu.Unlock()
 		return
 	}
 	r.Consecutive = 0
@@ -153,6 +177,8 @@ func (s *Store) ObserveInvalid(ip net.IP, reason string) {
 		s.log.Warn("ip temp banned", "ip", key, "reason", reason, "until", r.Until.UTC().Format(time.RFC3339), "duration", s.ttl.String())
 	}
 	_ = s.persistLocked()
+	s.mu.Unlock()
+	s.notify()
 }
 
 // ObserveValid resets the consecutive invalid counter (does not clear bans).

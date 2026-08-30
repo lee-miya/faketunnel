@@ -380,6 +380,21 @@ func (h *udpHub) reapLoop() {
 	}
 }
 
+func (h *udpHub) evictDisallowed(isAllowed func(net.IP) bool) {
+	var toRemove []uint32
+	h.mu.Lock()
+	for id, a := range h.byID {
+		if a.client != nil && !isAllowed(a.client.IP) {
+			toRemove = append(toRemove, id)
+		}
+	}
+	h.mu.Unlock()
+	for _, id := range toRemove {
+		h.s.log.Info("udp assoc evicted (acl/ban)", "tunnel", h.tun.Name, "id", id)
+		h.removeAssoc(id, true)
+	}
+}
+
 func (h *udpHub) reapIdle() {
 	cutoff := time.Now().Add(-h.idle)
 	var stale []uint32

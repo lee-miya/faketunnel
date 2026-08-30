@@ -66,10 +66,29 @@ func CloseReset(c net.Conn) {
 	if c == nil {
 		return
 	}
-	if tc, ok := c.(*net.TCPConn); ok {
-		_ = tc.SetLinger(0)
-		_ = tc.Close()
-		return
+	cur := c
+	for {
+		if tc, ok := cur.(*net.TCPConn); ok {
+			_ = tc.SetLinger(0)
+			_ = tc.Close()
+			return
+		}
+		if pc, ok := cur.(*proxiedConn); ok {
+			cur = pc.Conn
+			continue
+		}
+		if nc, ok := cur.(interface{ NetConn() net.Conn }); ok {
+			cur = nc.NetConn()
+			continue
+		}
+		type unwrapper interface {
+			Unwrap() net.Conn
+		}
+		if u, ok := cur.(unwrapper); ok {
+			cur = u.Unwrap()
+			continue
+		}
+		break
 	}
 	_ = c.Close()
 }

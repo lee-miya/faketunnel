@@ -72,6 +72,21 @@ func (hl *httpListener) closeAll() {
 	hl.conns = nil
 }
 
+func (hl *httpListener) evictDisallowed(isAllowed func(net.IP) bool) {
+	hl.mu.Lock()
+	var toClose []net.Conn
+	for c := range hl.conns {
+		ip := netutil.IPFromConn(c)
+		if !isAllowed(ip) {
+			toClose = append(toClose, c)
+		}
+	}
+	hl.mu.Unlock()
+	for _, c := range toClose {
+		netutil.CloseReset(c)
+	}
+}
+
 func (s *Server) startHTTP(ctx context.Context) error {
 	groups := groupHTTPTunnels(s.cfg.HTTPTunnels())
 	for public, group := range groups {

@@ -63,16 +63,22 @@ func New(cfg *config.File, list *acl.List, log *slog.Logger) (*Server, error) {
 		log = slog.Default()
 	}
 	store := acl.NewStore(list, cfg.AllowlistFile, log)
-	return &Server{
+	bans := ban.New(cfg.DenylistFile, log)
+	srv := &Server{
 		cfg:    cfg,
 		store:  store,
 		acl:    list,
-		bans:   ban.New(cfg.DenylistFile, log),
+		bans:   bans,
 		log:    log,
 		reg:    &metrics.Registry{},
 		public: make(map[string]net.Listener),
 		sem:    make(chan struct{}, cfg.MaxSessionsOrDefault()),
-	}, nil
+	}
+	srv.store.OnChange(srv.evictDisallowed)
+	if srv.bans != nil {
+		srv.bans.OnChange(srv.evictDisallowed)
+	}
+	return srv, nil
 }
 
 // Store returns the hot-updatable allowlist store.
@@ -228,6 +234,64 @@ func (s *Server) Shutdown() error {
 	}
 	s.log.Info("edge stopped")
 	return nil
+}
+
+func (s *Server) isAllowed(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	if s.bans != nil && s.bans.Blocked(ip) {
+		return false
+	}
+	if s.acl != nil && s.acl.Allow(ip) {
+		return true
+	}
+	return false
+}
+
+func (s *Server) evictDisallowed() {
+	s.evictTCPConns()
+	s.evictHTTPConns()
+	s.evictUDPAssocs()
+}
+
+func (s *Server) evictTCPConns() {
+	s.tcpMu.Lock()
+	var toClose []net.Conn
+	for c := range s.tcpConns {
+		ip := netutil.IPFromConn(c)
+		if !s.isAllowed(ip) {
+			toClose = append(toClose, c)
+		}
+	}
+	s.tcpMu.Unlock()
+	for _, c := range toClose {
+		s.log.Info("tcp conn evicted (acl/ban)", "remote", c.RemoteAddr().String())
+		netutil.CloseReset(c)
+	}
+}
+
+func (s *Server) evictHTTPConns() {
+	s.mu.RLock()
+	httpL := append([]*httpListener(nil), s.httpL...)
+	s.mu.RUnlock()
+	for _, hl := range httpL {
+		hl.evictDisallowed(s.isAllowed)
+	}
+}
+
+func (s *Server) evictUDPAssocs() {
+	s.udpMu.Lock()
+	hubs := make([]*udpHub, 0, len(s.udpHubs))
+	for _, h := range s.udpHubs {
+		if h != nil {
+			hubs = append(hubs, h)
+		}
+	}
+	s.udpMu.Unlock()
+	for _, h := range hubs {
+		h.evictDisallowed(s.isAllowed)
+	}
 }
 
 func (s *Server) trackTCP(c net.Conn, add bool) {

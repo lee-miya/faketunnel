@@ -12,10 +12,11 @@ import (
 // Concurrent mutations are serialized; List.Allow remains lock-free for readers
 // relative to Replace.
 type Store struct {
-	mu   sync.Mutex
-	list *List
-	path string
-	log  *slog.Logger
+	mu        sync.Mutex
+	list      *List
+	path      string
+	log       *slog.Logger
+	onChanges []func()
 }
 
 // NewStore binds an existing list to an optional JSON path.
@@ -48,26 +49,29 @@ func (s *Store) Len() int { return s.list.Len() }
 // Replace swaps the full set, persists, and audits.
 func (s *Store) Replace(cidrs []string, actor string) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if err := s.list.Replace(cidrs); err != nil {
+		s.mu.Unlock()
 		return err
 	}
 	if err := s.persistLocked(); err != nil {
+		s.mu.Unlock()
 		return err
 	}
 	s.audit("replace", actor, s.list.Entries())
+	s.mu.Unlock()
+	s.notify()
 	return nil
 }
 
 // Add appends CIDRs that are not already present (string-normalized).
 func (s *Store) Add(cidrs []string, actor string) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	cur := s.list.Entries()
 	seen := make(map[string]struct{}, len(cur))
 	for _, e := range cur {
 		key, err := normalizeKey(e)
 		if err != nil {
+			s.mu.Unlock()
 			return err
 		}
 		seen[key] = struct{}{}
@@ -81,6 +85,7 @@ func (s *Store) Add(cidrs []string, actor string) error {
 		}
 		key, err := normalizeKey(raw)
 		if err != nil {
+			s.mu.Unlock()
 			return fmt.Errorf("add %q: %w", raw, err)
 		}
 		if _, ok := seen[key]; ok {
@@ -91,22 +96,26 @@ func (s *Store) Add(cidrs []string, actor string) error {
 		added = append(added, raw)
 	}
 	if len(added) == 0 {
+		s.mu.Unlock()
 		return nil
 	}
 	if err := s.list.Replace(out); err != nil {
+		s.mu.Unlock()
 		return err
 	}
 	if err := s.persistLocked(); err != nil {
+		s.mu.Unlock()
 		return err
 	}
 	s.audit("add", actor, added)
+	s.mu.Unlock()
+	s.notify()
 	return nil
 }
 
 // Remove deletes matching CIDRs (by normalized network key).
 func (s *Store) Remove(cidrs []string, actor string) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	drop := make(map[string]struct{})
 	for _, raw := range cidrs {
 		raw = strings.TrimSpace(raw)
@@ -115,11 +124,13 @@ func (s *Store) Remove(cidrs []string, actor string) error {
 		}
 		key, err := normalizeKey(raw)
 		if err != nil {
+			s.mu.Unlock()
 			return fmt.Errorf("remove %q: %w", raw, err)
 		}
 		drop[key] = struct{}{}
 	}
 	if len(drop) == 0 {
+		s.mu.Unlock()
 		return nil
 	}
 	cur := s.list.Entries()
@@ -128,6 +139,7 @@ func (s *Store) Remove(cidrs []string, actor string) error {
 	for _, e := range cur {
 		key, err := normalizeKey(e)
 		if err != nil {
+			s.mu.Unlock()
 			return err
 		}
 		if _, ok := drop[key]; ok {
@@ -137,16 +149,40 @@ func (s *Store) Remove(cidrs []string, actor string) error {
 		out = append(out, e)
 	}
 	if len(removed) == 0 {
+		s.mu.Unlock()
 		return nil
 	}
 	if err := s.list.Replace(out); err != nil {
+		s.mu.Unlock()
 		return err
 	}
 	if err := s.persistLocked(); err != nil {
+		s.mu.Unlock()
 		return err
 	}
 	s.audit("remove", actor, removed)
+	s.mu.Unlock()
+	s.notify()
 	return nil
+}
+
+// OnChange registers a hook called whenever the allowlist is modified.
+func (s *Store) OnChange(fn func()) {
+	if fn == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onChanges = append(s.onChanges, fn)
+}
+
+func (s *Store) notify() {
+	s.mu.Lock()
+	fns := append([]func(){}, s.onChanges...)
+	s.mu.Unlock()
+	for _, fn := range fns {
+		fn()
+	}
 }
 
 func (s *Store) persistLocked() error {

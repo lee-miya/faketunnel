@@ -163,3 +163,23 @@ func TestIPv4Mapped(t *testing.T) {
 		t.Fatal("mapped v6 should ban v4")
 	}
 }
+
+func TestBanStoreOnChange(t *testing.T) {
+	t.Parallel()
+	s := New("", nil)
+	calls := 0
+	s.OnChange(func() {
+		calls++
+	})
+	ip := net.ParseIP("203.0.113.88")
+	for i := 0; i < 4; i++ {
+		s.ObserveInvalid(ip, "acl")
+	}
+	if calls != 0 {
+		t.Fatalf("unexpected notify before ban, got %d", calls)
+	}
+	s.ObserveInvalid(ip, "acl")
+	if calls != 1 {
+		t.Fatalf("want 1 notify on ban, got %d", calls)
+	}
+}
