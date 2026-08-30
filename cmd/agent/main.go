@@ -1,0 +1,59 @@
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"os"
+	"os/signal"
+	"syscall"
+
+	"mytunnel/internal/agent"
+	"mytunnel/internal/config"
+	"mytunnel/internal/logutil"
+)
+
+var version = "dev"
+
+func main() {
+	configPath := flag.String("config", "", "path to agent YAML config")
+	showVersion := flag.Bool("version", false, "print version and exit")
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "myTunnel Agent — 本机出站隧道客户端（NAT/防火墙友好）\n\n")
+		fmt.Fprintf(os.Stderr, "用法: agent -config path/to/agent.yaml\n\n")
+		flag.PrintDefaults()
+	}
+	flag.Parse()
+	if *showVersion {
+		fmt.Println(version)
+		return
+	}
+	if *configPath == "" {
+		flag.Usage()
+		os.Exit(2)
+	}
+
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "config: %v\n", err)
+		os.Exit(1)
+	}
+	if err := cfg.ValidateAgent(); err != nil {
+		fmt.Fprintf(os.Stderr, "config: %v\n", err)
+		os.Exit(1)
+	}
+	log := logutil.New(cfg.LogLevelOrDefault(), cfg.LogFormatOrDefault())
+	cli, err := agent.New(cfg, log)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "agent: %v\n", err)
+		os.Exit(1)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	log.Info("agent starting", "version", version)
+	if err := cli.Run(ctx); err != nil && ctx.Err() == nil {
+		fmt.Fprintf(os.Stderr, "agent: %v\n", err)
+		os.Exit(1)
+	}
+}

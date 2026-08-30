@@ -1,0 +1,28 @@
+# 构建产物
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+coverage.out
+
+# 本地 Go 工具链（若安装在仓库内）
+.tools/
+
+# 密钥与本地配置
+.env
+*.pem
+*.key
+configs/certs/
+configs/local/
+!configs/examples/
+
+# 编辑器 / 代理记忆
+.cursor/
+AGENTS.md
+.idea/
+.vscode/
+
+# 测试与操作系统
+.DS_Store
+Thumbs.db

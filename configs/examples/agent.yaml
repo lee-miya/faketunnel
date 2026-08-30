@@ -1,0 +1,12 @@
+# 开发示例：Agent 主动出站连接 Edge，无需开放本机入站端口。
+edge: "127.0.0.1:8443"
+token: "dev-token-change-me"
+tls:
+  insecure_skip_verify: true
+  server_name: localhost
+tunnels:
+  - name: echo
+    type: tcp
+    local: "127.0.0.1:9000"
+log_level: info
+# local_private_only: true

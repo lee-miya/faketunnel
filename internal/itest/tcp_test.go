@@ -1,0 +1,244 @@
+package itest
+
+import (
+	"context"
+	"io"
+	"net"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"mytunnel/internal/acl"
+	"mytunnel/internal/agent"
+	"mytunnel/internal/config"
+	"mytunnel/internal/edge"
+	"mytunnel/internal/logutil"
+	"mytunnel/internal/tlsutil"
+)
+
+func TestEndToEndTCP(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skip e2e in short mode")
+	}
+	backend := startEcho(t)
+	edgeCfg, agentCfg := testPair(t)
+
+	list, err := acl.New([]string{"127.0.0.1/32", "::1/128"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := logutil.New("error", "text")
+	edgeCfg.Tunnels[0].Local = backend
+	agentCfg.Tunnels[0].Local = backend
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	srv, err := edge.New(edgeCfg, list, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Shutdown()
+
+	agentCfg.Edge = srv.TunnelAddr()
+	cli, err := agent.New(agentCfg, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = cli.Run(ctx) }()
+
+	public := srv.PublicAddr("echo")
+	if public == "" {
+		t.Fatal("missing public addr")
+	}
+	echoRetry(t, public, 8*time.Second)
+}
+
+func TestACLDeny(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skip e2e in short mode")
+	}
+	edgeCfg, _ := testPair(t)
+	list, err := acl.New([]string{"203.0.113.10/32"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := logutil.New("error", "text")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	srv, err := edge.New(edgeCfg, list, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Shutdown()
+
+	conn, err := net.DialTimeout("tcp", srv.PublicAddr("echo"), 2*time.Second)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+	_, err = conn.Write([]byte("should-fail"))
+	if err == nil {
+		buf := make([]byte, 16)
+		_, err = conn.Read(buf)
+	}
+	if err == nil {
+		t.Fatal("expected denied connection to fail")
+	}
+}
+
+func TestReconnectAfterEdgeRestart(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skip e2e in short mode")
+	}
+	backend := startEcho(t)
+	edgeCfg, agentCfg := testPair(t)
+	list, err := acl.New([]string{"127.0.0.1/32", "::1/128"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := logutil.New("error", "text")
+	edgeCfg.Tunnels[0].Local = backend
+	agentCfg.Tunnels[0].Local = backend
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	srv, err := edge.New(edgeCfg, list, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	tunnelAddr := srv.TunnelAddr()
+	public := srv.PublicAddr("echo")
+	agentCfg.Edge = tunnelAddr
+
+	cli, err := agent.New(agentCfg, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = cli.Run(ctx) }()
+	echoRetry(t, public, 8*time.Second)
+
+	if err := srv.Shutdown(); err != nil {
+		t.Fatal(err)
+	}
+
+	edgeCfg.Listen = tunnelAddr
+	edgeCfg.Tunnels[0].Public = public
+	srv2, err := edge.New(edgeCfg, list, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv2.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer srv2.Shutdown()
+	echoRetry(t, public, 12*time.Second)
+}
+
+func testPair(t *testing.T) (*config.File, *config.File) {
+	t.Helper()
+	dir := t.TempDir()
+	certPEM, keyPEM, err := tlsutil.GenerateSelfSigned([]string{"localhost", "127.0.0.1"}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certPath := filepath.Join(dir, "edge.crt")
+	keyPath := filepath.Join(dir, "edge.key")
+	if err := os.WriteFile(certPath, certPEM, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, keyPEM, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	edgeCfg := &config.File{
+		Listen: "127.0.0.1:0",
+		Token:  "test-token",
+		TLS:    config.TLS{Cert: certPath, Key: keyPath},
+		Tunnels: []config.Tunnel{{
+			Name:   "echo",
+			Type:   config.TypeTCP,
+			Public: "127.0.0.1:0",
+			Local:  "127.0.0.1:9",
+		}},
+	}
+	agentCfg := &config.File{
+		Token: "test-token",
+		TLS:   config.TLS{CA: certPath, ServerName: "localhost"},
+		Tunnels: []config.Tunnel{{
+			Name:  "echo",
+			Type:  config.TypeTCP,
+			Local: "127.0.0.1:9",
+		}},
+	}
+	return edgeCfg, agentCfg
+}
+
+func startEcho(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				_, _ = io.Copy(c, c)
+			}(c)
+		}
+	}()
+	return ln.Addr().String()
+}
+
+func echoRetry(t *testing.T, addr string, wait time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(wait)
+	var last error
+	for time.Now().Before(deadline) {
+		if err := tryEcho(addr); err == nil {
+			return
+		} else {
+			last = err
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("echo %s: %v", addr, last)
+}
+
+func tryEcho(addr string) error {
+	c, err := net.DialTimeout("tcp", addr, 300*time.Millisecond)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	msg := []byte("hello-mytunnel")
+	_ = c.SetDeadline(time.Now().Add(time.Second))
+	if _, err := c.Write(msg); err != nil {
+		return err
+	}
+	got := make([]byte, len(msg))
+	if _, err := io.ReadFull(c, got); err != nil {
+		return err
+	}
+	if string(got) != string(msg) {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
