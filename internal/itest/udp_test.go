@@ -8,12 +8,12 @@ import (
 	"testing"
 	"time"
 
-	"mytunnel/internal/acl"
-	"mytunnel/internal/agent"
-	"mytunnel/internal/config"
-	"mytunnel/internal/edge"
-	"mytunnel/internal/logutil"
-	"mytunnel/internal/tlsutil"
+	"faketunnel/internal/acl"
+	"faketunnel/internal/agent"
+	"faketunnel/internal/config"
+	"faketunnel/internal/edge"
+	"faketunnel/internal/logutil"
+	"faketunnel/internal/tlsutil"
 )
 
 func TestEndToEndUDP(t *testing.T) {
@@ -188,7 +188,7 @@ func tryUDPEcho(addr string) error {
 		return err
 	}
 	defer conn.Close()
-	msg := []byte("hello-udp-mytunnel")
+	msg := []byte("hello-udp-faketunnel")
 	_ = conn.SetDeadline(time.Now().Add(time.Second))
 	if _, err := conn.Write(msg); err != nil {
 		return err

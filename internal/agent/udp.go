@@ -6,9 +6,9 @@ import (
 	"sync"
 	"time"
 
-	"mytunnel/internal/proxy"
-	"mytunnel/internal/safe"
-	"mytunnel/internal/tunnel"
+	"faketunnel/internal/proxy"
+	"faketunnel/internal/safe"
+	"faketunnel/internal/tunnel"
 )
 
 type udpStream struct {

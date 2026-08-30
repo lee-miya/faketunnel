@@ -4,19 +4,18 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"sync"
 	"time"
 
-	"mytunnel/internal/config"
-	"mytunnel/internal/netutil"
-	"mytunnel/internal/proxy"
-	"mytunnel/internal/safe"
-	"mytunnel/internal/tlsutil"
-	"mytunnel/internal/tunnel"
+	"faketunnel/internal/config"
+	"faketunnel/internal/netutil"
+	"faketunnel/internal/proxy"
+	"faketunnel/internal/safe"
+	"faketunnel/internal/tlsutil"
+	"faketunnel/internal/tunnel"
 )
 
 // httpListener is one public HTTP(S) bind shared by one or more Host/SNI routes.
@@ -28,7 +27,6 @@ type httpListener struct {
 	byName   map[string]config.Tunnel
 	certs    map[string]*tls.Certificate
 	fallback *tls.Certificate
-	server   *http.Server
 }
 
 func (s *Server) startHTTP(ctx context.Context) error {
@@ -50,7 +48,7 @@ func (s *Server) startHTTP(ctx context.Context) error {
 		for _, tun := range group.byHost {
 			hl.byName[tun.Name] = tun
 		}
-		if group.tls {
+		if group.tls && groupNeedsTerminate(group) {
 			if err := s.loadHTTPCerts(hl, group); err != nil {
 				_ = pln.Close()
 				_ = s.closeListeners()
@@ -60,7 +58,6 @@ func (s *Server) startHTTP(ctx context.Context) error {
 		for name := range group.names {
 			s.public[name] = pln
 		}
-		hl.server = s.newHTTPServer(hl)
 		s.httpL = append(s.httpL, hl)
 
 		names := make([]string, 0, len(group.names))
@@ -82,6 +79,15 @@ type httpGroup struct {
 	tls    bool
 	byHost map[string]config.Tunnel
 	names  map[string]struct{}
+}
+
+func groupNeedsTerminate(group *httpGroup) bool {
+	for _, tun := range group.byHost {
+		if tun.TLS && !tun.Passthrough {
+			return true
+		}
+	}
+	return false
 }
 
 func groupHTTPTunnels(tunnels []config.Tunnel) map[string]*httpGroup {
@@ -119,6 +125,9 @@ func (s *Server) loadHTTPCerts(hl *httpListener, group *httpGroup) error {
 	hl.fallback = &edgeCert
 
 	for host, tun := range group.byHost {
+		if tun.Passthrough {
+			continue
+		}
 		if tun.Cert != "" && tun.Key != "" {
 			cert, err := tls.LoadX509KeyPair(tun.Cert, tun.Key)
 			if err != nil {
@@ -139,58 +148,204 @@ func (s *Server) loadHTTPCerts(hl *httpListener, group *httpGroup) error {
 	return nil
 }
 
-func (s *Server) newHTTPServer(hl *httpListener) *http.Server {
-	return &http.Server{
-		Handler:           s.httpHandler(hl),
-		ReadHeaderTimeout: 10 * time.Second,
-		ErrorLog:          slog.NewLogLogger(s.log.Handler(), slog.LevelDebug),
-	}
-}
-
 func (s *Server) serveHTTP(ctx context.Context, hl *httpListener) {
-	var err error
-	if hl.tls {
-		cfg := &tls.Config{
-			MinVersion: tls.VersionTLS12,
-			GetCertificate: func(chi *tls.ClientHelloInfo) (*tls.Certificate, error) {
-				key := proxy.NormalizeHost(chi.ServerName)
-				if c, ok := hl.certs[key]; ok {
-					return c, nil
-				}
-				if hl.fallback != nil {
-					return hl.fallback, nil
-				}
-				return nil, fmt.Errorf("no certificate for sni %q", chi.ServerName)
-			},
-		}
-		err = hl.server.Serve(tls.NewListener(hl.ln, cfg))
-	} else {
-		err = hl.server.Serve(hl.ln)
-	}
-	select {
-	case <-ctx.Done():
-		return
-	default:
-	}
-	if err != nil && err != http.ErrServerClosed {
-		s.log.Debug("http serve end", "addr", hl.public, "err", err)
-	}
-}
-
-func (s *Server) httpHandler(hl *httpListener) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ip := netutil.IPFromAddr(r.RemoteAddr)
-		if !s.acl.Allow(ip) {
-			ipStr := ""
-			if ip != nil {
-				ipStr = ip.String()
+	for {
+		conn, err := hl.ln.Accept()
+		if err != nil {
+			select {
+			case <-ctx.Done():
+				return
+			default:
 			}
-			s.reg.IncDeny()
-			s.log.Warn("acl deny", "ip", ipStr, "proto", "http")
-			http.Error(w, "forbidden", http.StatusForbidden)
+			s.log.Debug("http accept", "addr", hl.public, "err", err)
 			return
 		}
+		conn, err = netutil.MaybeProxy(conn, s.cfg.ProxyProtocol)
+		if err != nil {
+			s.log.Warn("proxy protocol", "err", err)
+			continue
+		}
+		s.wg.Add(1)
+		safe.Go(s.log, "http-conn", func() {
+			defer s.wg.Done()
+			s.handleHTTPConn(hl, conn)
+		})
+	}
+}
 
+func (s *Server) handleHTTPConn(hl *httpListener, conn net.Conn) {
+	defer func() { _ = conn.Close() }()
+
+	ip := netutil.IPFromConn(conn)
+	if !s.acl.Allow(ip) {
+		ipStr := ""
+		if ip != nil {
+			ipStr = ip.String()
+		}
+		s.reg.IncDeny()
+		s.log.Warn("acl deny", "ip", ipStr, "proto", "http")
+		if !hl.tls {
+			writeHTTPStatus(conn, http.StatusForbidden, "forbidden")
+		} else {
+			netutil.CloseReset(conn)
+		}
+		return
+	}
+
+	_ = conn.SetReadDeadline(time.Now().Add(s.cfg.DialOrDefault()))
+
+	var sni string
+	alpn := ""
+	if hl.tls {
+		name, hello, err := proxy.PeekClientHello(conn)
+		if err != nil {
+			s.log.Debug("tls peek", "addr", hl.public, "err", err)
+			return
+		}
+		sni = name
+		conn = proxy.WithPrefix(conn, hello)
+		tun, ok := lookupHTTPTunnel(hl, sni)
+		if !ok {
+			s.log.Debug("no tunnel for sni", "sni", sni)
+			return
+		}
+		if tun.Passthrough {
+			_ = conn.SetReadDeadline(time.Time{})
+			s.spliceHTTP(tun, conn, sni, "", false, true)
+			return
+		}
+		tlsConn := tls.Server(conn, hl.tlsConfig(tun))
+		if err := tlsConn.Handshake(); err != nil {
+			s.log.Debug("http tls handshake", "tunnel", tun.Name, "err", err)
+			return
+		}
+		conn = tlsConn
+		cs := tlsConn.ConnectionState()
+		if cs.ServerName != "" {
+			sni = cs.ServerName
+		}
+		alpn = cs.NegotiatedProtocol
+	}
+
+	if alpn == "h2" {
+		_ = conn.SetReadDeadline(time.Time{})
+		tun, ok := lookupHTTPTunnel(hl, sni)
+		if !ok {
+			return
+		}
+		s.spliceHTTP(tun, conn, sni, "", true, false)
+		return
+	}
+
+	head, err := proxy.PeekHTTP(conn)
+	if err != nil {
+		s.log.Debug("http peek", "addr", hl.public, "err", err)
+		return
+	}
+	conn = proxy.WithPrefix(conn, head.Raw)
+	_ = conn.SetReadDeadline(time.Time{})
+
+	if head.HTTP2 {
+		tun, ok := lookupHTTPTunnel(hl, head.Host, sni)
+		if !ok {
+			return
+		}
+		s.spliceHTTP(tun, conn, sni, head.Path, true, false)
+		return
+	}
+
+	s.serveHTTP1(hl, conn)
+}
+
+func (s *Server) serveHTTP1(hl *httpListener, conn net.Conn) {
+	done := make(chan struct{})
+	var once sync.Once
+	closeDone := func() { once.Do(func() { close(done) }) }
+	ln := &singleConnListener{conn: conn, addr: conn.LocalAddr(), done: done}
+	srv := &http.Server{
+		Handler:           s.http1Handler(hl),
+		ReadHeaderTimeout: 10 * time.Second,
+		ConnState: func(_ net.Conn, st http.ConnState) {
+			if st == http.StateClosed || st == http.StateHijacked {
+				closeDone()
+			}
+		},
+	}
+	_ = srv.Serve(ln)
+	closeDone()
+}
+
+func (hl *httpListener) tlsConfig(tun config.Tunnel) *tls.Config {
+	next := []string{"http/1.1"}
+	if tun.HTTP2 {
+		next = []string{"h2", "http/1.1"}
+	}
+	return &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		NextProtos: next,
+		GetCertificate: func(chi *tls.ClientHelloInfo) (*tls.Certificate, error) {
+			key := proxy.NormalizeHost(chi.ServerName)
+			if c, ok := hl.certs[key]; ok {
+				return c, nil
+			}
+			if hl.fallback != nil {
+				return hl.fallback, nil
+			}
+			return nil, fmt.Errorf("no certificate for sni %q", chi.ServerName)
+		},
+	}
+}
+
+func (s *Server) spliceHTTP(tun config.Tunnel, conn net.Conn, sni, path string, http2, passthrough bool) {
+	select {
+	case s.sem <- struct{}{}:
+		defer func() { <-s.sem }()
+	default:
+		s.log.Warn("max sessions reached", "tunnel", tun.Name)
+		if !passthrough && !http2 {
+			writeHTTPStatus(conn, http.StatusServiceUnavailable, "too many sessions")
+		}
+		return
+	}
+
+	sess := s.getSession()
+	if sess == nil {
+		s.log.Warn("no agent connected", "tunnel", tun.Name)
+		if !passthrough && !http2 {
+			writeHTTPStatus(conn, http.StatusBadGateway, "no agent")
+		}
+		return
+	}
+
+	stream, err := sess.OpenData(tunnel.OpenMeta{
+		Name:       tun.Name,
+		Local:      tun.Local,
+		ClientAddr: conn.RemoteAddr().String(),
+		Proto:      tunnel.ProtoHTTP,
+	})
+	if err != nil {
+		s.log.Warn("http open stream", "tunnel", tun.Name, "err", err)
+		if !passthrough && !http2 {
+			writeHTTPStatus(conn, http.StatusBadGateway, "bad gateway")
+		}
+		return
+	}
+
+	s.reg.AddSessions(1)
+	defer s.reg.AddSessions(-1)
+
+	mode := "h2c"
+	if passthrough {
+		mode = "h2-passthrough"
+	}
+	s.log.Info("http session", "tunnel", tun.Name, "sni", sni, "client", conn.RemoteAddr().String(), "path", path, "mode", mode)
+	if err := proxy.Relay(conn, stream, s.cfg.IdleOrDefault()); err != nil {
+		s.log.Debug("http relay end", "tunnel", tun.Name, "err", err)
+	}
+}
+
+func (s *Server) http1Handler(hl *httpListener) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		health := s.cfg.HealthPathOrDefault()
 		if health != "" && r.URL.Path == health {
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -199,7 +354,10 @@ func (s *Server) httpHandler(hl *httpListener) http.Handler {
 			return
 		}
 
-		tun, ok := lookupHTTPTunnel(hl, r)
+		tun, ok := lookupHTTPTunnel(hl, r.Host)
+		if !ok && r.TLS != nil {
+			tun, ok = lookupHTTPTunnel(hl, r.TLS.ServerName)
+		}
 		if !ok {
 			http.Error(w, "no tunnel for host", http.StatusBadGateway)
 			return
@@ -249,12 +407,12 @@ func (s *Server) httpHandler(hl *httpListener) http.Handler {
 				http.Error(rw, "bad gateway", http.StatusBadGateway)
 			},
 		}
-		s.log.Info("http session", "tunnel", tun.Name, "host", r.Host, "client", r.RemoteAddr, "path", r.URL.Path)
+		s.log.Info("http session", "tunnel", tun.Name, "host", r.Host, "client", r.RemoteAddr, "path", r.URL.Path, "mode", "http1")
 		rp.ServeHTTP(w, r)
 	})
 }
 
-func lookupHTTPTunnel(hl *httpListener, r *http.Request) (config.Tunnel, bool) {
+func lookupHTTPTunnel(hl *httpListener, hosts ...string) (config.Tunnel, bool) {
 	byHost := make(map[string]string, len(hl.tunnels))
 	empty := ""
 	for host, tun := range hl.tunnels {
@@ -264,34 +422,53 @@ func lookupHTTPTunnel(hl *httpListener, r *http.Request) (config.Tunnel, bool) {
 		}
 		byHost[host] = tun.Name
 	}
-	try := []string{r.Host}
-	if r.TLS != nil && r.TLS.ServerName != "" {
-		try = append(try, r.TLS.ServerName)
-	}
-	for _, candidate := range try {
-		if name, ok := proxy.MatchHost(candidate, byHost, empty); ok {
+	for _, candidate := range hosts {
+		if candidate == "" {
+			continue
+		}
+		if name, ok := proxy.MatchHost(candidate, byHost, ""); ok {
 			if tun, found := hl.byName[name]; found {
 				return tun, true
 			}
 		}
 	}
+	if empty != "" {
+		if tun, found := hl.byName[empty]; found {
+			return tun, true
+		}
+	}
 	return config.Tunnel{}, false
 }
 
-func (s *Server) shutdownHTTP() {
-	var wg sync.WaitGroup
-	for _, hl := range s.httpL {
-		if hl.server == nil {
-			continue
-		}
-		srv := hl.server
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			ctx, cancel := context.WithTimeout(context.Background(), s.cfg.ShutdownOrDefault())
-			defer cancel()
-			_ = srv.Shutdown(ctx)
-		}()
+func writeHTTPStatus(w net.Conn, status int, body string) {
+	if body != "" && body[len(body)-1] != '\n' {
+		body += "\n"
 	}
-	wg.Wait()
+	_, _ = fmt.Fprintf(w, "HTTP/1.1 %d %s\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\nContent-Length: %d\r\n\r\n%s",
+		status, http.StatusText(status), len(body), body)
+}
+
+type singleConnListener struct {
+	conn net.Conn
+	addr net.Addr
+	done <-chan struct{}
+	once sync.Once
+}
+
+func (l *singleConnListener) Accept() (net.Conn, error) {
+	var c net.Conn
+	l.once.Do(func() { c = l.conn })
+	if c != nil {
+		return c, nil
+	}
+	<-l.done
+	return nil, net.ErrClosed
+}
+
+func (l *singleConnListener) Close() error { return nil }
+
+func (l *singleConnListener) Addr() net.Addr { return l.addr }
+
+func (s *Server) shutdownHTTP() {
+	// Accept loops stop when listeners close; in-flight splices drain via WaitGroup.
 }

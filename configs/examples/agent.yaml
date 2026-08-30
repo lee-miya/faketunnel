@@ -14,6 +14,9 @@ tunnels:
   - name: web-tls
     type: http
     local: "127.0.0.1:3000"
+  - name: web-h2
+    type: http
+    local: "127.0.0.1:3443"
   - name: dns-demo
     type: udp
     local: "127.0.0.1:9053"

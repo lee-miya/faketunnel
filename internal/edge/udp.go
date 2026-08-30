@@ -7,10 +7,10 @@ import (
 	"sync"
 	"time"
 
-	"mytunnel/internal/config"
-	"mytunnel/internal/proxy"
-	"mytunnel/internal/safe"
-	"mytunnel/internal/tunnel"
+	"faketunnel/internal/config"
+	"faketunnel/internal/proxy"
+	"faketunnel/internal/safe"
+	"faketunnel/internal/tunnel"
 )
 
 type udpHub struct {

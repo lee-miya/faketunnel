@@ -173,6 +173,39 @@ func TestValidateEdgeUDP(t *testing.T) {
 	}
 }
 
+func TestValidateEdgeHTTPPassthrough(t *testing.T) {
+	t.Parallel()
+	cfg := &File{
+		Listen: ":8443",
+		Token:  "x",
+		TLS:    TLS{AutoSelfSigned: true},
+		Tunnels: []Tunnel{{
+			Name: "h2", Type: TypeHTTP, Public: "127.0.0.1:443",
+			TLS: true, Passthrough: true, Host: "h2.example", Local: "127.0.0.1:1",
+		}},
+	}
+	if err := cfg.ValidateEdge(); err != nil {
+		t.Fatal(err)
+	}
+	// Passthrough does not need public HTTPS certs; tunnel TLS still uses auto_self_signed.
+	cfg.TLS.Cert = ""
+	cfg.TLS.Key = ""
+	if err := cfg.ValidateEdge(); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Tunnels[0].Passthrough = false
+	cfg.TLS.AutoSelfSigned = false
+	if err := cfg.ValidateEdge(); err == nil {
+		t.Fatal("expected cert required for terminate")
+	}
+	cfg.TLS.AutoSelfSigned = true
+	cfg.Tunnels[0].Passthrough = true
+	cfg.Tunnels[0].TLS = false
+	if err := cfg.ValidateEdge(); err == nil {
+		t.Fatal("expected passthrough requires tls")
+	}
+}
+
 func TestValidateEdgeAdminRequiresTokenAndAllowlistFile(t *testing.T) {
 	t.Parallel()
 	cfg := &File{

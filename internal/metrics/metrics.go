@@ -106,23 +106,23 @@ func (r *Registry) WritePrometheus(w io.Writer) error {
 	if st.AgentConnected {
 		agent = 1
 	}
-	_, err := fmt.Fprintf(w, `# HELP mytunnel_agent_connected Whether an Agent is connected (1/0).
-# TYPE mytunnel_agent_connected gauge
-mytunnel_agent_connected %d
-# HELP mytunnel_active_sessions Active TCP/HTTP sessions and UDP associations.
-# TYPE mytunnel_active_sessions gauge
-mytunnel_active_sessions %d
-# HELP mytunnel_acl_denies_total Total public connections rejected by allowlist.
-# TYPE mytunnel_acl_denies_total counter
-mytunnel_acl_denies_total %d
+	_, err := fmt.Fprintf(w, `# HELP faketunnel_agent_connected Whether an Agent is connected (1/0).
+# TYPE faketunnel_agent_connected gauge
+faketunnel_agent_connected %d
+# HELP faketunnel_active_sessions Active TCP/HTTP sessions and UDP associations.
+# TYPE faketunnel_active_sessions gauge
+faketunnel_active_sessions %d
+# HELP faketunnel_acl_denies_total Total public connections rejected by allowlist.
+# TYPE faketunnel_acl_denies_total counter
+faketunnel_acl_denies_total %d
 `, agent, st.ActiveSessions, st.ACLDenies)
 	if err != nil {
 		return err
 	}
 	if st.HasRTT {
-		_, err = fmt.Fprintf(w, `# HELP mytunnel_tunnel_rtt_seconds Last measured control-channel RTT.
-# TYPE mytunnel_tunnel_rtt_seconds gauge
-mytunnel_tunnel_rtt_seconds %g
+		_, err = fmt.Fprintf(w, `# HELP faketunnel_tunnel_rtt_seconds Last measured control-channel RTT.
+# TYPE faketunnel_tunnel_rtt_seconds gauge
+faketunnel_tunnel_rtt_seconds %g
 `, st.TunnelRTTMs/1000)
 	}
 	return err

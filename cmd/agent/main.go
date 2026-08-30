@@ -8,9 +8,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	"mytunnel/internal/agent"
-	"mytunnel/internal/config"
-	"mytunnel/internal/logutil"
+	"faketunnel/internal/agent"
+	"faketunnel/internal/config"
+	"faketunnel/internal/logutil"
 )
 
 var version = "dev"
@@ -19,7 +19,7 @@ func main() {
 	configPath := flag.String("config", "", "path to agent YAML config")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "myTunnel Agent — 本机出站隧道客户端（NAT/防火墙友好）\n\n")
+		fmt.Fprintf(os.Stderr, "fakeTunnel Agent — 本机出站隧道客户端（NAT/防火墙友好）\n\n")
 		fmt.Fprintf(os.Stderr, "用法: agent -config path/to/agent.yaml\n\n")
 		flag.PrintDefaults()
 	}

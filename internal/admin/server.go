@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"mytunnel/internal/acl"
-	"mytunnel/internal/metrics"
+	"faketunnel/internal/acl"
+	"faketunnel/internal/metrics"
 )
 
 const maxBody = 1 << 20

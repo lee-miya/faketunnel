@@ -29,13 +29,13 @@ func run(args []string) int {
 		return 0
 	case "allowlist":
 		if err := runAllowlist(args[1:]); err != nil {
-			fmt.Fprintf(os.Stderr, "mytunnel: %v\n", err)
+			fmt.Fprintf(os.Stderr, "faketunnel: %v\n", err)
 			return 1
 		}
 		return 0
 	case "status":
 		if err := runStatus(args[1:]); err != nil {
-			fmt.Fprintf(os.Stderr, "mytunnel: %v\n", err)
+			fmt.Fprintf(os.Stderr, "faketunnel: %v\n", err)
 			return 1
 		}
 		return 0
@@ -50,19 +50,19 @@ func run(args []string) int {
 }
 
 func usage() {
-	fmt.Fprintf(os.Stderr, `myTunnel CLI — 管理 Edge allowlist 与状态
+	fmt.Fprintf(os.Stderr, `fakeTunnel CLI — 管理 Edge allowlist 与状态
 
 用法:
-  mytunnel allowlist list  [-admin URL] [-token TOKEN] [-token-file PATH]
-  mytunnel allowlist add   <cidr>... [-admin URL] [-token TOKEN]
-  mytunnel allowlist rm    <cidr>... [-admin URL] [-token TOKEN]
-  mytunnel allowlist set   <cidr>... [-admin URL] [-token TOKEN]
-  mytunnel status          [-admin URL] [-token TOKEN]
-  mytunnel version
+  faketunnel allowlist list  [-admin URL] [-token TOKEN] [-token-file PATH]
+  faketunnel allowlist add   <cidr>... [-admin URL] [-token TOKEN]
+  faketunnel allowlist rm    <cidr>... [-admin URL] [-token TOKEN]
+  faketunnel allowlist set   <cidr>... [-admin URL] [-token TOKEN]
+  faketunnel status          [-admin URL] [-token TOKEN]
+  faketunnel version
 
 环境变量:
-  MYTUNNEL_ADMIN   Admin API 根地址（默认 http://127.0.0.1:9090）
-  MYTUNNEL_TOKEN   Admin Bearer token
+  FAKETUNNEL_ADMIN   Admin API 根地址（默认 http://127.0.0.1:9090）
+  FAKETUNNEL_TOKEN   Admin Bearer token
 
 `)
 }
@@ -75,8 +75,8 @@ type client struct {
 }
 
 func newClient(fs *flag.FlagSet, args []string) (*client, []string, error) {
-	adminURL := fs.String("admin", envOr("MYTUNNEL_ADMIN", "http://127.0.0.1:9090"), "Admin API base URL")
-	token := fs.String("token", os.Getenv("MYTUNNEL_TOKEN"), "Admin Bearer token")
+	adminURL := fs.String("admin", envOr("FAKETUNNEL_ADMIN", "http://127.0.0.1:9090"), "Admin API base URL")
+	token := fs.String("token", os.Getenv("FAKETUNNEL_TOKEN"), "Admin Bearer token")
 	tokenFile := fs.String("token-file", "", "read admin token from file")
 	actor := fs.String("actor", "", "optional X-Admin-Actor audit label")
 	if err := fs.Parse(args); err != nil {
@@ -91,7 +91,7 @@ func newClient(fs *flag.FlagSet, args []string) (*client, []string, error) {
 		tok = strings.TrimSpace(string(data))
 	}
 	if tok == "" {
-		return nil, nil, fmt.Errorf("admin token required (-token, -token-file, or MYTUNNEL_TOKEN)")
+		return nil, nil, fmt.Errorf("admin token required (-token, -token-file, or FAKETUNNEL_TOKEN)")
 	}
 	return &client{
 		base:  strings.TrimRight(strings.TrimSpace(*adminURL), "/"),
@@ -131,17 +131,17 @@ func runAllowlist(args []string) error {
 		return nil
 	case "add":
 		if len(rest) == 0 {
-			return fmt.Errorf("usage: mytunnel allowlist add <cidr>...")
+			return fmt.Errorf("usage: faketunnel allowlist add <cidr>...")
 		}
 		return cli.postAllowlist(rest)
 	case "rm", "remove", "delete":
 		if len(rest) == 0 {
-			return fmt.Errorf("usage: mytunnel allowlist rm <cidr>...")
+			return fmt.Errorf("usage: faketunnel allowlist rm <cidr>...")
 		}
 		return cli.deleteAllowlist(rest)
 	case "set", "replace":
 		if len(rest) == 0 {
-			return fmt.Errorf("usage: mytunnel allowlist set <cidr>...")
+			return fmt.Errorf("usage: faketunnel allowlist set <cidr>...")
 		}
 		return cli.putAllowlist(rest)
 	default:

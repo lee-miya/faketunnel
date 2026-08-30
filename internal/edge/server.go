@@ -9,15 +9,15 @@ import (
 	"sync"
 	"time"
 
-	"mytunnel/internal/acl"
-	"mytunnel/internal/admin"
-	"mytunnel/internal/config"
-	"mytunnel/internal/metrics"
-	"mytunnel/internal/netutil"
-	"mytunnel/internal/proxy"
-	"mytunnel/internal/safe"
-	"mytunnel/internal/tlsutil"
-	"mytunnel/internal/tunnel"
+	"faketunnel/internal/acl"
+	"faketunnel/internal/admin"
+	"faketunnel/internal/config"
+	"faketunnel/internal/metrics"
+	"faketunnel/internal/netutil"
+	"faketunnel/internal/proxy"
+	"faketunnel/internal/safe"
+	"faketunnel/internal/tlsutil"
+	"faketunnel/internal/tunnel"
 )
 
 // Server is the public-side Edge process.

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"net"
 
-	"mytunnel/internal/tunnel"
+	"faketunnel/internal/tunnel"
 )
 
 // MaxUDPPayload is the largest UDP datagram accepted for tunnel forwarding.

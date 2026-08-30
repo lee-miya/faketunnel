@@ -27,6 +27,14 @@ tunnels:
     tls: true
     host: "secure.localhost"
     local: "127.0.0.1:3000"
+  # HTTP/2 端到端透传：Edge 不解密，按 SNI 把 TLS 拼到源站（源站需证书且支持 h2）
+  - name: web-h2
+    type: http
+    public: "127.0.0.1:8445"
+    tls: true
+    passthrough: true
+    host: "h2.localhost"
+    local: "127.0.0.1:3443"
   - name: dns-demo
     type: udp
     # 5353 是 mDNS，桌面 Linux 上常被 Avahi 占用

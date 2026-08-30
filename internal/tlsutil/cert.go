@@ -16,7 +16,7 @@ import (
 	"time"
 )
 
-const ALPN = "mytunnel/1"
+const ALPN = "faketunnel/1"
 
 // GenerateSelfSigned returns PEM-encoded cert and key for the given hosts
 // (DNS names or IP addresses).
@@ -34,7 +34,7 @@ func GenerateSelfSigned(hosts []string, validFor time.Duration) (certPEM, keyPEM
 	}
 	tpl := &x509.Certificate{
 		SerialNumber:          serial,
-		Subject:               pkix.Name{Organization: []string{"myTunnel"}, CommonName: "mytunnel-edge"},
+		Subject:               pkix.Name{Organization: []string{"fakeTunnel"}, CommonName: "faketunnel-edge"},
 		NotBefore:             time.Now().Add(-time.Hour),
 		NotAfter:              time.Now().Add(validFor),
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,

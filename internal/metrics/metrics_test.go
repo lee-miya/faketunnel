@@ -22,10 +22,10 @@ func TestRegistryPrometheus(t *testing.T) {
 	}
 	out := buf.String()
 	for _, want := range []string{
-		"mytunnel_acl_denies_total 2",
-		"mytunnel_active_sessions 3",
-		"mytunnel_agent_connected 1",
-		"mytunnel_tunnel_rtt_seconds",
+		"faketunnel_acl_denies_total 2",
+		"faketunnel_active_sessions 3",
+		"faketunnel_agent_connected 1",
+		"faketunnel_tunnel_rtt_seconds",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in:\n%s", want, out)

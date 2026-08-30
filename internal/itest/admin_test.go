@@ -12,11 +12,11 @@ import (
 	"testing"
 	"time"
 
-	"mytunnel/internal/acl"
-	"mytunnel/internal/agent"
-	"mytunnel/internal/config"
-	"mytunnel/internal/edge"
-	"mytunnel/internal/logutil"
+	"faketunnel/internal/acl"
+	"faketunnel/internal/agent"
+	"faketunnel/internal/config"
+	"faketunnel/internal/edge"
+	"faketunnel/internal/logutil"
 )
 
 func TestAdminAllowlistHotReload(t *testing.T) {
@@ -213,8 +213,8 @@ func TestMetricsAndStatus(t *testing.T) {
 		}
 		body, _ = io.ReadAll(resp.Body)
 		resp.Body.Close()
-		if bytes.Contains(body, []byte("mytunnel_tunnel_rtt_seconds")) &&
-			bytes.Contains(body, []byte("mytunnel_agent_connected 1")) {
+		if bytes.Contains(body, []byte("faketunnel_tunnel_rtt_seconds")) &&
+			bytes.Contains(body, []byte("faketunnel_agent_connected 1")) {
 			return
 		}
 		time.Sleep(200 * time.Millisecond)

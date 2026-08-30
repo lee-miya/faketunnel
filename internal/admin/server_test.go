@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"mytunnel/internal/acl"
-	"mytunnel/internal/metrics"
+	"faketunnel/internal/acl"
+	"faketunnel/internal/metrics"
 )
 
 func TestAllowlistCRUD(t *testing.T) {
@@ -112,7 +112,7 @@ func TestAllowlistCRUD(t *testing.T) {
 	}
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if resp.StatusCode != 200 || !bytes.Contains(body, []byte("mytunnel_acl_denies_total")) {
+	if resp.StatusCode != 200 || !bytes.Contains(body, []byte("faketunnel_acl_denies_total")) {
 		t.Fatalf("metrics=%s", body)
 	}
 

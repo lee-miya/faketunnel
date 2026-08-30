@@ -63,14 +63,16 @@ type TLS struct {
 
 // Tunnel is one public-to-local mapping.
 type Tunnel struct {
-	Name   string `yaml:"name"`
-	Type   string `yaml:"type"`
-	Public string `yaml:"public"`
-	TLS    bool   `yaml:"tls"` // when type=http: terminate TLS on Edge (HTTPS)
-	Local  string `yaml:"local"`
-	Host   string `yaml:"host"` // HTTP Host / TLS SNI; empty = catch-all on that public
-	Cert   string `yaml:"cert"` // optional per-tunnel HTTPS cert (relative to config dir)
-	Key    string `yaml:"key"`
+	Name        string `yaml:"name"`
+	Type        string `yaml:"type"`
+	Public      string `yaml:"public"`
+	TLS         bool   `yaml:"tls"`         // type=http: public port is TLS
+	Passthrough bool   `yaml:"passthrough"` // type=http + tls: do not terminate; SNI splice (HTTP/2 e2e)
+	HTTP2       bool   `yaml:"http2"`       // type=http + tls terminate: offer ALPN h2; origin must speak h2c
+	Local       string `yaml:"local"`
+	Host        string `yaml:"host"` // HTTP Host / TLS SNI; empty = catch-all on that public
+	Cert        string `yaml:"cert"` // optional per-tunnel HTTPS cert (relative to config dir)
+	Key         string `yaml:"key"`
 }
 
 // Duration wraps time.Duration for YAML strings like "5m".
@@ -283,7 +285,10 @@ func (c *File) ValidateEdge() error {
 		if _, ok := publicTCP[t.Public]; ok {
 			return fmt.Errorf("public listen %q used by both tcp and http", t.Public)
 		}
-		if t.TLS {
+		if t.Passthrough && !t.TLS {
+			return fmt.Errorf("tunnel %q: passthrough requires tls: true", t.Name)
+		}
+		if t.TLS && !t.Passthrough {
 			hasPair := (t.Cert != "" && t.Key != "") || (c.TLS.Cert != "" && c.TLS.Key != "") || c.TLS.AutoSelfSigned
 			if !hasPair {
 				return fmt.Errorf("tunnel %q: https requires cert/key (tunnel or edge tls) or tls.auto_self_signed", t.Name)

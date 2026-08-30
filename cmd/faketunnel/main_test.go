@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"mytunnel/internal/acl"
-	"mytunnel/internal/admin"
-	"mytunnel/internal/metrics"
+	"faketunnel/internal/acl"
+	"faketunnel/internal/admin"
+	"faketunnel/internal/metrics"
 )
 
 func TestCLIVersion(t *testing.T) {
@@ -46,8 +46,8 @@ func TestCLIHelpAndUnknown(t *testing.T) {
 }
 
 func TestCLIMissingToken(t *testing.T) {
-	t.Setenv("MYTUNNEL_TOKEN", "")
-	t.Setenv("MYTUNNEL_ADMIN", "")
+	t.Setenv("FAKETUNNEL_TOKEN", "")
+	t.Setenv("FAKETUNNEL_ADMIN", "")
 	err := runAllowlist([]string{"list", "-admin", "http://127.0.0.1:9"})
 	if err == nil || !strings.Contains(err.Error(), "admin token required") {
 		t.Fatalf("want token error, got %v", err)
@@ -55,7 +55,7 @@ func TestCLIMissingToken(t *testing.T) {
 }
 
 func TestCLIAllowlistCRUDAndStatus(t *testing.T) {
-	t.Setenv("MYTUNNEL_TOKEN", "")
+	t.Setenv("FAKETUNNEL_TOKEN", "")
 	base, store, reg := startAdmin(t)
 	tok := "secret"
 
@@ -139,8 +139,8 @@ func TestCLITokenFileAndEnv(t *testing.T) {
 		t.Fatalf("token-file list=%q", out)
 	}
 
-	t.Setenv("MYTUNNEL_TOKEN", "secret")
-	t.Setenv("MYTUNNEL_ADMIN", base)
+	t.Setenv("FAKETUNNEL_TOKEN", "secret")
+	t.Setenv("FAKETUNNEL_ADMIN", base)
 	out = captureStdout(t, func() {
 		if err := runAllowlist([]string{"list"}); err != nil {
 			t.Fatal(err)
@@ -161,7 +161,7 @@ func TestCLITokenFileAndEnv(t *testing.T) {
 }
 
 func TestCLIRunDispatchREADME(t *testing.T) {
-	t.Setenv("MYTUNNEL_TOKEN", "secret")
+	t.Setenv("FAKETUNNEL_TOKEN", "secret")
 	base, _, _ := startAdmin(t)
 
 	out := captureStdout(t, func() {
@@ -184,7 +184,7 @@ func TestCLIRunDispatchREADME(t *testing.T) {
 }
 
 func TestCLIErrors(t *testing.T) {
-	t.Setenv("MYTUNNEL_TOKEN", "secret")
+	t.Setenv("FAKETUNNEL_TOKEN", "secret")
 	base, _, _ := startAdmin(t)
 
 	if err := runAllowlist(nil); err == nil || !strings.Contains(err.Error(), "subcommand") {

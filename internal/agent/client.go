@@ -9,11 +9,11 @@ import (
 	"net"
 	"time"
 
-	"mytunnel/internal/config"
-	"mytunnel/internal/proxy"
-	"mytunnel/internal/safe"
-	"mytunnel/internal/tlsutil"
-	"mytunnel/internal/tunnel"
+	"faketunnel/internal/config"
+	"faketunnel/internal/proxy"
+	"faketunnel/internal/safe"
+	"faketunnel/internal/tlsutil"
+	"faketunnel/internal/tunnel"
 )
 
 const (
