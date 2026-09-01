@@ -71,7 +71,7 @@ func Init(opts InitOptions) (*InitResult, error) {
 	listen = ExpandAddr(listen, false)
 	tunnelPort := addrPort(listen)
 	if tunnelPort == "" {
-		tunnelPort = "8443"
+		tunnelPort = DefaultTunnelPort
 	}
 
 	edgeHost := strings.TrimSpace(opts.EdgeHost)
@@ -166,9 +166,8 @@ type initTunnel struct {
 func renderEdgeYAML(listen string, tunnels []initTunnel) string {
 	var b strings.Builder
 	b.WriteString("# fakeTunnel Edge — 由 faketunnel init 生成。未写出的项使用默认值。\n")
-	if listen != DefaultListen {
-		fmt.Fprintf(&b, "listen: %q\n", listen)
-	}
+	b.WriteString("# listen 是 Agent 来连的隧道口，公网建议改成不常见端口；须与 agent.yaml 的 edge 端口一致。\n")
+	fmt.Fprintf(&b, "listen: %q\n", listen)
 	b.WriteString("token_file: token\n")
 	b.WriteString("tunnels:\n")
 	for _, t := range tunnels {
@@ -182,6 +181,7 @@ func renderEdgeYAML(listen string, tunnels []initTunnel) string {
 func renderAgentYAML(edge, token string) string {
 	var b strings.Builder
 	b.WriteString("# fakeTunnel Agent — 拷到源站机器即可；不必再列 tunnels。\n")
+	b.WriteString("# edge 的端口必须与 Edge 的 listen 一致。\n")
 	fmt.Fprintf(&b, "edge: %q\n", edge)
 	fmt.Fprintf(&b, "token: %q\n", token)
 	return b.String()

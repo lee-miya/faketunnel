@@ -117,8 +117,6 @@ func LoadOrGenerate(certPath, keyPath string, auto bool, hosts []string) (tls.Ce
 }
 
 // ServerConfig builds a TLS 1.2+ server config.
-// NextProtos is advertised so old Agents that send ALPN still match; a client
-// that sends no ALPN also succeeds (crypto/tls skips negotiation).
 func ServerConfig(cert tls.Certificate) *tls.Config {
 	return &tls.Config{
 		Certificates: []tls.Certificate{cert},
@@ -136,11 +134,8 @@ func HTTPSConfig(cert tls.Certificate) *tls.Config {
 	}
 }
 
-// ClientConfig builds a TLS 1.2+ client config.
-//
-// The client does not advertise ALPN. If both sides send NextProtos and they
-// do not overlap, crypto/tls aborts the handshake (often as EOF). Token auth
-// identifies the tunnel after TLS, so ALPN is not required on the client.
+// ClientConfig builds a TLS 1.2+ client config. ALPN is omitted so mixed
+// Edge/Agent versions still complete the handshake; token auth follows TLS.
 func ClientConfig(caPath, serverName string, insecure bool) (*tls.Config, error) {
 	cfg := &tls.Config{
 		MinVersion:         tls.VersionTLS12,
@@ -161,11 +156,8 @@ func ClientConfig(caPath, serverName string, insecure bool) (*tls.Config, error)
 	return cfg, nil
 }
 
-// DialConfig returns a per-dial TLS config for addr.
-//
-// A ClientHello with SNI "localhost" aimed at a public IP is dropped by some
-// firewalls and TLS frontends (Agent sees handshake EOF). When addr is a
-// non-loopback IP, SNI is omitted; certificate checks still use ServerName.
+// DialConfig is a per-dial copy of base. Public-IP targets omit SNI so a
+// ClientHello with server_name=localhost is not sent to a VPS address.
 func DialConfig(base *tls.Config, addr string) *tls.Config {
 	cfg := base.Clone()
 	host, _, err := net.SplitHostPort(addr)

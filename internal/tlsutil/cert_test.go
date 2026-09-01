@@ -98,7 +98,7 @@ func TestClientConfigOmitsALPN(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(cfg.NextProtos) != 0 {
-		t.Fatalf("client ALPN %v; want none (avoids handshake EOF against old Edge)", cfg.NextProtos)
+		t.Fatalf("client ALPN %v; want none", cfg.NextProtos)
 	}
 }
 

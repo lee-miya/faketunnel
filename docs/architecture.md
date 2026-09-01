@@ -5,7 +5,7 @@
 - **Edge**：跑在公网 VPS。监听 Agent 隧道口（TLS）以及各 TCP / HTTP(S) / UDP 公网端口。入站连接先做 IP allowlist，命中后经 yamux 交给 Agent。
 - **Agent**：只出站连接 Edge（NAT/防火墙友好）。默认按 Edge 在 OpenStream 里下发的 `local` 拨号（本机环回或内网 `IP:端口`）；配置里仍可列出 tunnels 作为允许名单或覆盖目标。
 - **Allowlist**：Edge 本地 JSON 文件 + 内存原子替换；Admin API / CLI 写盘后立即生效，无需重启。文件缺失时默认写入环回。
-- **Denylist**：同一 IP 连续 5 次无效（业务口 ACL deny 或 Admin 鉴权失败）临时封禁 6 小时；第二次封禁永久。持久化 `denylist.json`。
+- **Denylist**：同一 IP 连续 5 次无效（业务口 ACL deny、**隧道口 TLS/token 失败**、或 Admin 鉴权失败）临时封禁 6 小时；第二次封禁永久。持久化 `denylist.json`。
 - **Admin**：默认在 `127.0.0.1:9090`；Bearer token 可自动生成到 `admin.token`。可热改 allowlist、解封、查看状态与 Prometheus 指标。非环回监听强制 HTTPS。
 
 ```

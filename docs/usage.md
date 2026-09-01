@@ -230,7 +230,7 @@ export FAKETUNNEL_TOKEN=admin-dev-token-change-me
 ### 5.0 用 init 生成（推荐）
 
 ```bash
-./bin/faketunnel init -dir /opt/faketunnel/configs -edge VPS_IP -http 8080:3000 -tcp 2222
+./bin/faketunnel init -dir /opt/faketunnel/configs -edge VPS_IP -listen :27443 -http 8080:3000 -tcp 2222
 ./bin/faketunnel init -dir ./configs -edge VPS_IP -preset gitea
 ```
 
@@ -240,7 +240,7 @@ export FAKETUNNEL_TOKEN=admin-dev-token-change-me
 |------|------|------|
 | `-dir` | `.` | 输出目录 |
 | `-edge` | `127.0.0.1` | 写入 `agent.yaml` 的 Edge 主机（IP 或域名）。只写主机时自动拼上隧道端口 |
-| `-listen` | `:8443` | Edge 隧道监听地址 |
+| `-listen` | `:8443` | Edge 隧道监听地址，写入 `edge.yaml` 的 `listen`。公网建议改成不常见端口；`agent.yaml` 的 `edge` 端口必须一致 |
 | `-http` | 无 | HTTP 映射，可重复。格式见下 |
 | `-tcp` | 无 | TCP 映射，可重复 |
 | `-udp` | 无 | UDP 映射，可重复 |
@@ -330,7 +330,7 @@ Agent 若列出 `tunnels`：按 `name` 作为**允许名单**（未列出的隧�
 
 | 字段 | 默认 | 说明 |
 |------|------|------|
-| `listen` | `:8443` | Agent 来连的 TLS 隧道口，不是业务口 |
+| `listen` | `:8443` | Agent 来连的 TLS 隧道口，不是业务口。**可改**（如 `:27443`）；公网不要用 8443 等常被扫描的端口。改了之后 Agent 的 `edge` 必须带同一端口 |
 | `tls.auto_self_signed` | 未配 cert/key 时为 true | 证书文件不存在时生成自签 |
 | `tls.cert` / `tls.key` | `<配置目录>/certs/edge.crt` `.key` | 隧道证书；也作为 HTTPS **终止**模式的回退证书 |
 | `allowlist_file` | `<配置目录>/allowlist.json` | **存在则以文件为准**，忽略 YAML 里的 `allowlist` |
@@ -628,7 +628,7 @@ openssl rand -hex 32   # Admin token，必须不同
 
 | 端口 | 谁访问 | 建议 |
 |------|--------|------|
-| 隧道 `listen`（如 8443/tcp） | 仅你的 Agent 出口 IP | 防火墙可限制源 IP；仍必须用强 token |
+| 隧道 `listen`（可改，勿长期用 8443） | 仅你的 Agent | 防火墙可限制源 IP；TLS/token 无效连续 5 次会临时封禁 6 小时 |
 | 业务 `public`（如 8080、2222） | allowlist 中的访问者 | 对公网开放；未允许的 IP 连续 5 次无效会被封 6 小时 |
 | Admin（如 9090） | 本机、SSH 转发，或按 6.3 用 HTTPS 对公网 | 非环回必须 HTTPS + 强 token；错误口令同样计入封禁 |
 | 源站端口 | 仅 Agent 能连到的网卡 | 同机则绑 `127.0.0.1`；跨机则绑内网并只放行 Agent |

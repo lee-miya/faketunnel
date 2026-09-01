@@ -11,7 +11,8 @@ import (
 )
 
 const (
-	DefaultListen       = ":8443"
+	DefaultTunnelPort   = "8443"
+	DefaultListen       = ":" + DefaultTunnelPort
 	DefaultAdminListen  = "127.0.0.1:9090"
 	DefaultTokenFile    = "token"
 	DefaultAdminToken   = "admin.token"
@@ -106,8 +107,6 @@ func (c *File) applyAgentDefaults() {
 			return
 		}
 		if c.SkipVerify() {
-			// Do not send SNI "localhost" to a public IP: some firewalls and
-			// TLS frontends abort that ClientHello (Agent sees handshake EOF).
 			c.TLS.ServerName = ""
 			return
 		}
@@ -210,8 +209,7 @@ func ExpandAddr(s string, localTarget bool) string {
 }
 
 // ExpandEdgeAddr normalizes an Agent edge target address.
-// Bare ports (8443, :8443) become 127.0.0.1:8443.
-// Bare hostnames/IPs (vps.example, 203.0.113.10) get the default tunnel port (:8443).
+// Bare ports become 127.0.0.1:port. Bare hostnames/IPs get DefaultTunnelPort.
 func ExpandEdgeAddr(s string) string {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -224,7 +222,7 @@ func ExpandEdgeAddr(s string) string {
 		return "127.0.0.1" + s
 	}
 	if _, _, err := net.SplitHostPort(s); err != nil {
-		return net.JoinHostPort(s, "8443")
+		return net.JoinHostPort(s, DefaultTunnelPort)
 	}
 	return s
 }

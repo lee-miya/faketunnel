@@ -107,18 +107,6 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 	s.tls = tlsutil.ServerConfig(cert)
 	s.cert = cert
-	s.tls.GetConfigForClient = func(chi *tls.ClientHelloInfo) (*tls.Config, error) {
-		remote := ""
-		if chi != nil && chi.Conn != nil {
-			remote = chi.Conn.RemoteAddr().String()
-		}
-		sni := ""
-		if chi != nil {
-			sni = chi.ServerName
-		}
-		s.log.Info("tunnel client hello", "remote", remote, "sni", sni)
-		return nil, nil
-	}
 
 	if s.cfg.Token == "dev-token-change-me" {
 		s.log.Warn("using example tunnel token; replace before exposing Edge on a public network")
@@ -130,9 +118,6 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 	s.tunnelLn = ln
 	s.log.Info("tunnel listen", "addr", ln.Addr().String())
-	if netutil.ListenHostIsLoopback(s.cfg.Listen) {
-		s.log.Warn("tunnel listen is loopback-only; remote Agents cannot connect — use listen: \":8443\" on a public VPS")
-	}
 
 	for _, t := range s.cfg.Tunnels {
 		switch t.Type {
@@ -441,16 +426,26 @@ func (s *Server) serveTunnel(ctx context.Context) {
 
 func (s *Server) handleAgent(conn net.Conn) {
 	defer conn.Close()
+	ip := netutil.IPFromConn(conn)
+	if s.bans != nil && s.bans.Blocked(ip) {
+		netutil.CloseReset(conn)
+		return
+	}
+	_ = conn.SetDeadline(time.Now().Add(tunnel.HandshakeTimeout))
 	if tc, ok := conn.(*tls.Conn); ok {
 		if err := tc.Handshake(); err != nil {
-			s.log.Warn("agent tls handshake failed", "remote", conn.RemoteAddr().String(), "err", err)
+			s.noteTunnelInvalid(ip, "tls", conn.RemoteAddr().String(), err)
 			return
 		}
 	}
 	agentID, err := tunnel.ServerHandshake(conn, s.cfg.Token, 0)
 	if err != nil {
-		s.log.Warn("agent handshake failed", "remote", conn.RemoteAddr().String(), "err", err)
+		s.noteTunnelInvalid(ip, "auth", conn.RemoteAddr().String(), err)
 		return
+	}
+	_ = conn.SetDeadline(time.Time{})
+	if s.bans != nil {
+		s.bans.ObserveValid(ip)
 	}
 	sess, err := tunnel.ServerSession(conn, s.log)
 	if err != nil {
@@ -476,6 +471,18 @@ func (s *Server) handleAgent(conn net.Conn) {
 	s.log.Info("agent connected", "agent_id", agentID, "remote", conn.RemoteAddr().String())
 	s.setSession(sess)
 	<-sess.CloseChan()
+}
+
+func (s *Server) noteTunnelInvalid(ip net.IP, kind, remote string, err error) {
+	s.reg.IncDeny()
+	if s.bans != nil {
+		s.bans.ObserveInvalid(ip, "tunnel")
+	}
+	if kind == "tls" {
+		s.log.Debug("agent tls handshake failed", "remote", remote, "err", err)
+		return
+	}
+	s.log.Warn("agent handshake failed", "remote", remote, "err", err)
 }
 
 func (s *Server) servePublic(ctx context.Context, tun config.Tunnel, ln net.Listener) {

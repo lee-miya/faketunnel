@@ -16,7 +16,7 @@
     │  SSH   :2222   （可选）
     ▼
 公网 VPS 上的 Edge
-    │  TLS 隧道 :8443（仅 Agent 来连）
+    │  TLS 隧道 listen（仅 Agent 来连；公网建议不用 8443）
     │  Admin   :9090（仅 127.0.0.1，SSH 转发后改 allowlist）
     ▼
 家宽 NAT 后的 Agent  ──►  同机 Gitea
@@ -50,11 +50,11 @@
 
 1. VPS 已能 SSH；已按 [usage.md 第 3 节](../usage.md#3-构建与编译) 构建出 `bin/edge`、`bin/agent`、`bin/faketunnel`（开发机与 VPS 架构不同时用交叉编译）。
 2. Gitea 已能打开：与 Agent 同机时 `http://127.0.0.1:3000`；跨机时从 Agent 那台能打开 `http://GITEA_LAN_IP:3000`。
-3. 决定公网端口（默认：Web **8080**，SSH **2222**，隧道 **8443**）。若 80/443 已被占用，保持 8080 即可。
+3. 决定公网端口（默认：Web **8080**，SSH **2222**，隧道建议不要用 **8443**，例如 `-listen :27443`）。若 80/443 已被占用，保持 8080 即可。
 4. 用 init 生成 token 与配置（不要手抄占位符）：
 
 ```bash
-./bin/faketunnel init -dir /opt/faketunnel/configs -edge VPS_IP -preset gitea
+./bin/faketunnel init -dir /opt/faketunnel/configs -edge VPS_IP -listen :27443 -preset gitea
 ```
 
 ## 3. 配置 Gitea
@@ -120,7 +120,7 @@ Agent 与 Gitea 不在同一台时，把上面的 `local` 改成 `"GITEA_LAN_IP:
 
 ### 隧道证书是干什么的
 
-**只给 Agent ↔ Edge 的隧道口（默认 8443）加密用，不是给浏览器访问 Gitea 的。**
+**只给 Agent ↔ Edge 的隧道口加密用，不是给浏览器访问 Gitea 的。**
 
 访问者打开的是明文 `http://VPS_IP:8080/`，SSH 是裸 TCP `:2222`，都不会校验证书，也看不到 `edge.crt`。
 
@@ -134,8 +134,8 @@ Agent 与 Gitea 不在同一台时，把上面的 `local` 改成 `"GITEA_LAN_IP:
 防火墙示例（nft/ufw 按你的系统改）：
 
 ```bash
-# 隧道口（可选：只允许家宽出口）
-sudo ufw allow 8443/tcp
+# 隧道口（与 edge.yaml 的 listen 一致；示例 27443）
+sudo ufw allow 27443/tcp
 # 业务口（真正限制靠 allowlist）
 sudo ufw allow 8080/tcp
 sudo ufw allow 2222/tcp
@@ -171,7 +171,7 @@ cp agent.yaml /opt/faketunnel/configs/agent.yaml
 内容就是：
 
 ```yaml
-edge: "VPS_IP:8443"   # 隧道口，不是 8080
+edge: "VPS_IP:27443"   # 必须与 Edge listen 端口一致，不是业务口 8080
 token: "<与 Edge 相同>"
 ```
 
@@ -182,7 +182,7 @@ scp /opt/faketunnel/configs/certs/edge.crt user@家宽机器:/opt/faketunnel/con
 ```
 
 ```yaml
-edge: "VPS_IP:8443"
+edge: "VPS_IP:27443"
 token: "<与 Edge 相同>"
 tls:
   insecure_skip_verify: false
@@ -190,7 +190,7 @@ tls:
   ca: "/opt/faketunnel/configs/certs/edge.crt"
 ```
 
-自签证书的 SAN 不含 VPS 公网 IP，所以 `server_name` 仍写 `localhost`，**不要**改成 `VPS_IP`。`edge:` 地址照样填真实 `VPS_IP:8443`。
+自签证书的 SAN 不含 VPS 公网 IP，所以 `server_name` 仍写 `localhost`，**不要**改成 `VPS_IP`。`edge:` 填真实 `VPS_IP` 加与 `listen` 相同的端口。
 
 ```bash
 ./bin/agent -config /opt/faketunnel/configs/agent.yaml
@@ -239,7 +239,7 @@ tunnels:
 
 ```yaml
 # agent.yaml — 仅在覆盖 local 时才需要
-edge: "VPS_IP:8443"
+edge: "VPS_IP:27443"
 token: "<与 Edge 相同>"
 tunnels:
   - name: http-8080

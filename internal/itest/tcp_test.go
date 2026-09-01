@@ -360,3 +360,51 @@ edge: "127.0.0.1:%s"
 	public := srv.PublicAddr("echo")
 	echoRetry(t, public, 8*time.Second)
 }
+
+func TestTunnelPortBanAfterInvalidTLS(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skip e2e in short mode")
+	}
+	edgeCfg, _ := testPair(t)
+	list, err := acl.New([]string{"127.0.0.1/32", "::1/128"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := logutil.New("error", "text")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	srv, err := edge.New(edgeCfg, list, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Shutdown()
+
+	addr := srv.TunnelAddr()
+	if addr == "" {
+		t.Fatal("missing tunnel addr")
+	}
+	for i := 0; i < 5; i++ {
+		c, err := net.DialTimeout("tcp", addr, time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = c.Write([]byte("GET / HTTP/1.1\r\n\r\n"))
+		_ = c.Close()
+		time.Sleep(40 * time.Millisecond)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	blocked := false
+	for time.Now().Before(deadline) {
+		if srv.Bans().Blocked(net.ParseIP("127.0.0.1")) || srv.Bans().Blocked(net.ParseIP("::1")) {
+			blocked = true
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !blocked {
+		t.Fatalf("want tunnel temp ban, bans=%v", srv.Bans().List())
+	}
+}

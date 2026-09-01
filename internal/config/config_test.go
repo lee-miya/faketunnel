@@ -504,8 +504,46 @@ func TestInitWritesPair(t *testing.T) {
 	if len(agent.Tunnels) != 0 {
 		t.Fatal("init agent should omit tunnels")
 	}
+	edgeBody, err := os.ReadFile(res.EdgeYAML)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(edgeBody), "listen:") {
+		t.Fatalf("init edge.yaml should write listen:\n%s", edgeBody)
+	}
+	if edge.Listen != DefaultListen {
+		t.Fatalf("listen=%q", edge.Listen)
+	}
 	if _, err := Init(InitOptions{Dir: dir, HTTP: []string{"80:80"}}); err == nil {
 		t.Fatal("expected exists error")
+	}
+}
+
+func TestInitCustomListen(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	res, err := Init(InitOptions{
+		Dir:      dir,
+		EdgeHost: "203.0.113.10",
+		Listen:   ":27443",
+		HTTP:     []string{"8080:3000"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	edge, err := LoadEdge(res.EdgeYAML)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if edge.Listen != ":27443" {
+		t.Fatalf("listen=%q; want :27443", edge.Listen)
+	}
+	agent, err := LoadAgent(res.AgentYAML)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agent.Edge != "203.0.113.10:27443" {
+		t.Fatalf("agent edge=%q; want 203.0.113.10:27443", agent.Edge)
 	}
 }
 

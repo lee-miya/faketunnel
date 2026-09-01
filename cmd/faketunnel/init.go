@@ -14,7 +14,7 @@ func runInit(args []string) error {
 	fs.SetOutput(os.Stderr)
 	dir := fs.String("dir", ".", "output directory")
 	edgeHost := fs.String("edge", "127.0.0.1", "Edge 公网主机名或 IP（写入 agent.yaml）")
-	listen := fs.String("listen", config.DefaultListen, "Edge 隧道监听地址")
+	listen := fs.String("listen", config.DefaultListen, "Edge 隧道监听地址（可改；公网建议避开 8443 等常见扫描口）")
 	preset := fs.String("preset", "", "隧道预设：gitea（HTTP 8080→3000 + TCP 2222）")
 	force := fs.Bool("force", false, "overwrite existing files")
 	var httpMaps, tcpMaps, udpMaps, allow strList
@@ -29,7 +29,7 @@ func runInit(args []string) error {
 Agent 配置不必再列 tunnels（Edge 会下发 local 目标）。
 
 示例:
-  faketunnel init -dir ./configs -edge 203.0.113.10 -http 8080:3000 -tcp 2222
+  faketunnel init -dir ./configs -edge 203.0.113.10 -listen :27443 -http 8080:3000 -tcp 2222
   faketunnel init -dir ./configs -edge vps.example.com -preset gitea
 
 `)
