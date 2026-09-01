@@ -2,6 +2,7 @@ package itest
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -282,4 +283,80 @@ func tryEcho(addr string) error {
 		return io.ErrUnexpectedEOF
 	}
 	return nil
+}
+
+func TestEdgeAgentShorthandConnect(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skip e2e in short mode")
+	}
+	backend := startEcho(t)
+	dir := t.TempDir()
+
+	edgeYAML := filepath.Join(dir, "edge.yaml")
+	agentYAML := filepath.Join(dir, "agent.yaml")
+
+	// Start a dummy listener to find a free port for Edge tunnel
+	freeLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, portStr, err := net.SplitHostPort(freeLn.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = freeLn.Close()
+
+	edgeContent := fmt.Sprintf(`
+token: "secret-test-token"
+listen: "127.0.0.1:%s"
+tunnels:
+  - name: echo
+    public: "127.0.0.1:0"
+    local: %q
+`, portStr, backend)
+	if err := os.WriteFile(edgeYAML, []byte(edgeContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	agentContent := fmt.Sprintf(`
+token: "secret-test-token"
+edge: "127.0.0.1:%s"
+`, portStr)
+	if err := os.WriteFile(agentYAML, []byte(agentContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	edgeCfg, err := config.LoadEdge(edgeYAML)
+	if err != nil {
+		t.Fatal(err)
+	}
+	list, err := acl.FromConfig(edgeCfg.AllowlistFile, []string{"127.0.0.1/32"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := logutil.New("error", "text")
+	srv, err := edge.New(edgeCfg, list, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := srv.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Shutdown()
+
+	agentCfg, err := config.LoadAgent(agentYAML)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cli, err := agent.New(agentCfg, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = cli.Run(ctx) }()
+
+	public := srv.PublicAddr("echo")
+	echoRetry(t, public, 8*time.Second)
 }

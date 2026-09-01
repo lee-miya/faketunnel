@@ -551,4 +551,102 @@ func TestExpandAddr(t *testing.T) {
 	if ExpandAddr("127.0.0.1:9", true) != "127.0.0.1:9" {
 		t.Fatal("unchanged")
 	}
+	if ExpandAddr("8443", false) != ":8443" {
+		t.Fatal("listen port")
+	}
+}
+
+func TestExpandEdgeAddr(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		in, want string
+	}{
+		{"8443", "127.0.0.1:8443"},
+		{":8443", "127.0.0.1:8443"},
+		{"127.0.0.1", "127.0.0.1:8443"},
+		{"127.0.0.1:8443", "127.0.0.1:8443"},
+		{"localhost", "localhost:8443"},
+		{"203.0.113.10", "203.0.113.10:8443"},
+		{"203.0.113.10:8443", "203.0.113.10:8443"},
+		{"vps.example.com", "vps.example.com:8443"},
+		{"vps.example.com:9443", "vps.example.com:9443"},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		if got := ExpandEdgeAddr(tc.in); got != tc.want {
+			t.Errorf("ExpandEdgeAddr(%q) = %q; want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestExpandAdminListen(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		in, want string
+	}{
+		{"9090", "127.0.0.1:9090"},
+		{":9090", "127.0.0.1:9090"},
+		{"127.0.0.1:9090", "127.0.0.1:9090"},
+		{"0.0.0.0:9090", "0.0.0.0:9090"},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		if got := ExpandAdminListen(tc.in); got != tc.want {
+			t.Errorf("ExpandAdminListen(%q) = %q; want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestLoadEdgeListenShorthand(t *testing.T) {
+	t.Parallel()
+	p := writeTemp(t, "edge.yaml", `
+token: "x"
+listen: 8443
+tunnels:
+  - public: 8080
+    local: 3000
+`)
+	cfg, err := LoadEdge(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Listen != ":8443" {
+		t.Fatalf("listen=%q; want :8443", cfg.Listen)
+	}
+}
+
+func TestLoadAgentEdgeShorthandAndServerName(t *testing.T) {
+	t.Parallel()
+	// Test bare host IP with CA
+	p := writeTemp(t, "agent.yaml", `
+token: "x"
+edge: "203.0.113.10"
+tls:
+  ca: "some-ca.crt"
+  insecure_skip_verify: false
+`)
+	cfg, err := LoadAgent(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Edge != "203.0.113.10:8443" {
+		t.Fatalf("edge=%q; want 203.0.113.10:8443", cfg.Edge)
+	}
+	// For IP target, server_name should default to localhost so self-signed cert SANs match.
+	if cfg.TLS.ServerName != "localhost" {
+		t.Fatalf("server_name=%q; want localhost", cfg.TLS.ServerName)
+	}
+
+	// Test bare port
+	p2 := writeTemp(t, "agent2.yaml", `
+token: "x"
+edge: 8443
+`)
+	cfg2, err := LoadAgent(p2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg2.Edge != "127.0.0.1:8443" {
+		t.Fatalf("edge=%q; want 127.0.0.1:8443", cfg2.Edge)
+	}
 }

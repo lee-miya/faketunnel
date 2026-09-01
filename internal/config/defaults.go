@@ -22,6 +22,15 @@ const (
 )
 
 func (c *File) applyCommon() {
+	if strings.TrimSpace(c.Listen) != "" {
+		c.Listen = ExpandAddr(c.Listen, false)
+	}
+	if strings.TrimSpace(c.Edge) != "" {
+		c.Edge = ExpandEdgeAddr(c.Edge)
+	}
+	if strings.TrimSpace(c.Admin.Listen) != "" {
+		c.Admin.Listen = ExpandAdminListen(c.Admin.Listen)
+	}
 	if strings.TrimSpace(c.Token) == "" && c.TokenFile == "" && c.Path != "" {
 		cand := filepath.Join(filepath.Dir(c.Path), DefaultTokenFile)
 		if st, err := os.Stat(cand); err == nil && !st.IsDir() {
@@ -46,6 +55,8 @@ func (c *File) applyCommon() {
 func (c *File) applyEdgeDefaults() error {
 	if strings.TrimSpace(c.Listen) == "" {
 		c.Listen = DefaultListen
+	} else {
+		c.Listen = ExpandAddr(c.Listen, false)
 	}
 	dir := ""
 	if c.Path != "" {
@@ -55,6 +66,8 @@ func (c *File) applyEdgeDefaults() error {
 		c.Admin.Listen = ""
 	} else if strings.TrimSpace(c.Admin.Listen) == "" {
 		c.Admin.Listen = DefaultAdminListen
+	} else {
+		c.Admin.Listen = ExpandAdminListen(c.Admin.Listen)
 	}
 	if c.AdminEnabled() && strings.TrimSpace(c.Admin.Token) == "" && c.Admin.TokenFile == "" && dir != "" {
 		c.Admin.TokenFile = filepath.Join(dir, DefaultAdminToken)
@@ -76,6 +89,9 @@ func (c *File) applyEdgeDefaults() error {
 }
 
 func (c *File) applyAgentDefaults() {
+	if strings.TrimSpace(c.Edge) != "" {
+		c.Edge = ExpandEdgeAddr(c.Edge)
+	}
 	if strings.TrimSpace(c.TLS.ServerName) != "" {
 		return
 	}
@@ -85,8 +101,14 @@ func (c *File) applyAgentDefaults() {
 	}
 	host, _, err := net.SplitHostPort(strings.TrimSpace(c.Edge))
 	if err == nil && host != "" {
-		c.TLS.ServerName = host
+		if net.ParseIP(host) != nil {
+			c.TLS.ServerName = "localhost"
+		} else {
+			c.TLS.ServerName = host
+		}
+		return
 	}
+	c.TLS.ServerName = "localhost"
 }
 
 func inferType(t *Tunnel) {
@@ -177,6 +199,42 @@ func ExpandAddr(s string, localTarget bool) string {
 			return "127.0.0.1:" + s
 		}
 		return ":" + s
+	}
+	return s
+}
+
+// ExpandEdgeAddr normalizes an Agent edge target address.
+// Bare ports (8443, :8443) become 127.0.0.1:8443.
+// Bare hostnames/IPs (vps.example, 203.0.113.10) get the default tunnel port (:8443).
+func ExpandEdgeAddr(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return s
+	}
+	if isPort(s) {
+		return "127.0.0.1:" + s
+	}
+	if strings.HasPrefix(s, ":") {
+		return "127.0.0.1" + s
+	}
+	if _, _, err := net.SplitHostPort(s); err != nil {
+		return net.JoinHostPort(s, "8443")
+	}
+	return s
+}
+
+// ExpandAdminListen normalizes an Admin API listen address.
+// Bare ports (9090, :9090) default to loopback (127.0.0.1:9090).
+func ExpandAdminListen(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return s
+	}
+	if isPort(s) {
+		return "127.0.0.1:" + s
+	}
+	if strings.HasPrefix(s, ":") {
+		return "127.0.0.1" + s
 	}
 	return s
 }

@@ -3,6 +3,7 @@ package edge
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -390,6 +391,7 @@ func (s *Server) getSession() *tunnel.Session {
 
 func (s *Server) serveTunnel(ctx context.Context) {
 	ln := tls.NewListener(s.tunnelLn, s.tls)
+	var tempDelay time.Duration
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -398,9 +400,26 @@ func (s *Server) serveTunnel(ctx context.Context) {
 				return
 			default:
 			}
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
+			if ne, ok := err.(net.Error); ok && ne.Temporary() {
+				if tempDelay == 0 {
+					tempDelay = 5 * time.Millisecond
+				} else {
+					tempDelay *= 2
+				}
+				if max := 1 * time.Second; tempDelay > max {
+					tempDelay = max
+				}
+				s.log.Warn("tunnel accept temporary error", "err", err, "retry_in", tempDelay)
+				time.Sleep(tempDelay)
+				continue
+			}
 			s.log.Debug("tunnel accept", "err", err)
 			return
 		}
+		tempDelay = 0
 		s.wg.Add(1)
 		safe.Go(s.log, "agent-conn", func() {
 			defer s.wg.Done()
