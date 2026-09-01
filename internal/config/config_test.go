@@ -384,8 +384,8 @@ token: "x"
 	if !cfg.SkipVerify() {
 		t.Fatal("skip verify should default on without ca")
 	}
-	if cfg.TLS.ServerName != "localhost" {
-		t.Fatalf("server_name=%q", cfg.TLS.ServerName)
+	if cfg.TLS.ServerName != "" {
+		t.Fatalf("server_name=%q; want empty SNI for public IP + skip-verify", cfg.TLS.ServerName)
 	}
 }
 
@@ -648,5 +648,41 @@ edge: 8443
 	}
 	if cfg2.Edge != "127.0.0.1:8443" {
 		t.Fatalf("edge=%q; want 127.0.0.1:8443", cfg2.Edge)
+	}
+	if cfg2.TLS.ServerName != "localhost" {
+		t.Fatalf("loopback server_name=%q; want localhost", cfg2.TLS.ServerName)
+	}
+}
+
+func TestLoadAgentSkipVerifyHostnameSNI(t *testing.T) {
+	t.Parallel()
+	p := writeTemp(t, "agent.yaml", `
+token: "x"
+edge: "vps.example.com:8443"
+`)
+	cfg, err := LoadAgent(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TLS.ServerName != "vps.example.com" {
+		t.Fatalf("server_name=%q; want vps.example.com", cfg.TLS.ServerName)
+	}
+}
+
+func TestValidateEdgeListenConflictsPublic(t *testing.T) {
+	t.Parallel()
+	cfg := &File{
+		Listen: ":8443",
+		Token:  "x",
+		TLS:    TLS{AutoSelfSigned: true},
+		Tunnels: []Tunnel{{
+			Name:   "web",
+			Type:   TypeHTTP,
+			Public: ":8443",
+			Local:  "127.0.0.1:3000",
+		}},
+	}
+	if err := cfg.ValidateEdge(); err == nil || !strings.Contains(err.Error(), "conflicts with tunnel listen") {
+		t.Fatalf("want listen conflict, got %v", err)
 	}
 }

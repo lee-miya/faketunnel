@@ -3,7 +3,9 @@ package agent
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/rand/v2"
 	"net"
@@ -83,16 +85,21 @@ func (c *Client) Run(ctx context.Context) error {
 
 func (c *Client) connectOnce(ctx context.Context) (bool, error) {
 	d := &net.Dialer{Timeout: c.cfg.DialOrDefault()}
-	c.log.Info("dialing edge", "addr", c.cfg.Edge)
+	c.log.Info("dialing edge", "addr", c.cfg.Edge, "server_name", c.tls.ServerName)
 	raw, err := d.DialContext(ctx, "tcp", c.cfg.Edge)
 	if err != nil {
 		return false, fmt.Errorf("dial: %w", err)
 	}
-	tlsConn := tls.Client(raw, c.tls)
+	_ = raw.SetDeadline(time.Now().Add(c.cfg.DialOrDefault()))
+	tlsConn := tls.Client(raw, c.tls.Clone())
 	if err := tlsConn.HandshakeContext(ctx); err != nil {
 		_ = raw.Close()
+		if errors.Is(err, io.EOF) {
+			return false, fmt.Errorf("tls handshake: EOF (TCP to %s ok, but peer closed TLS; edge: must be the tunnel listen port, usually 8443, not HTTP/TCP public)", c.cfg.Edge)
+		}
 		return false, fmt.Errorf("tls handshake: %w", err)
 	}
+	_ = raw.SetDeadline(time.Time{})
 	conn := net.Conn(tlsConn)
 	defer conn.Close()
 

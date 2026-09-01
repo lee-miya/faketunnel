@@ -95,20 +95,26 @@ func (c *File) applyAgentDefaults() {
 	if strings.TrimSpace(c.TLS.ServerName) != "" {
 		return
 	}
-	if c.SkipVerify() {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(c.Edge))
+	if err != nil || host == "" {
 		c.TLS.ServerName = "localhost"
 		return
 	}
-	host, _, err := net.SplitHostPort(strings.TrimSpace(c.Edge))
-	if err == nil && host != "" {
-		if net.ParseIP(host) != nil {
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLoopback() {
 			c.TLS.ServerName = "localhost"
-		} else {
-			c.TLS.ServerName = host
+			return
 		}
+		if c.SkipVerify() {
+			// Do not send SNI "localhost" to a public IP: some firewalls and
+			// TLS frontends abort that ClientHello (Agent sees handshake EOF).
+			c.TLS.ServerName = ""
+			return
+		}
+		c.TLS.ServerName = "localhost"
 		return
 	}
-	c.TLS.ServerName = "localhost"
+	c.TLS.ServerName = host
 }
 
 func inferType(t *Tunnel) {

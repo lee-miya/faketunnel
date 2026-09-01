@@ -383,6 +383,28 @@ func (c *File) ValidateEdge() error {
 		}
 		g.hosts[hostKey] = t.Name
 	}
+	if err := c.validateListenConflicts(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c *File) validateListenConflicts() error {
+	listenPort := addrPort(c.Listen)
+	if listenPort == "" || listenPort == "0" {
+		return nil
+	}
+	if p := addrPort(c.Admin.Listen); p != "" && p != "0" && p == listenPort {
+		return fmt.Errorf("admin.listen port %s conflicts with tunnel listen", p)
+	}
+	for _, t := range c.Tunnels {
+		if t.Type == TypeUDP {
+			continue
+		}
+		if p := addrPort(t.Public); p != "" && p != "0" && p == listenPort {
+			return fmt.Errorf("tunnel %q public port %s conflicts with tunnel listen", t.Name, listenPort)
+		}
+	}
 	return nil
 }
 

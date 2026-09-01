@@ -112,6 +112,16 @@ func TestHandshakeClientWithoutALPN(t *testing.T) {
 	})
 }
 
+func TestHandshakeEmptyServerName(t *testing.T) {
+	t.Parallel()
+	cert := mustSelfSigned(t)
+	clientCfg, err := ClientConfig("", "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustHandshake(t, ServerConfig(cert), clientCfg)
+}
+
 func TestHandshakeLegacyAgentToNewEdge(t *testing.T) {
 	t.Parallel()
 	cert := mustSelfSigned(t)

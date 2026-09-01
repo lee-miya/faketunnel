@@ -107,6 +107,18 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 	s.tls = tlsutil.ServerConfig(cert)
 	s.cert = cert
+	s.tls.GetConfigForClient = func(chi *tls.ClientHelloInfo) (*tls.Config, error) {
+		remote := ""
+		if chi != nil && chi.Conn != nil {
+			remote = chi.Conn.RemoteAddr().String()
+		}
+		sni := ""
+		if chi != nil {
+			sni = chi.ServerName
+		}
+		s.log.Info("tunnel client hello", "remote", remote, "sni", sni)
+		return nil, nil
+	}
 
 	if s.cfg.Token == "dev-token-change-me" {
 		s.log.Warn("using example tunnel token; replace before exposing Edge on a public network")
@@ -118,6 +130,9 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 	s.tunnelLn = ln
 	s.log.Info("tunnel listen", "addr", ln.Addr().String())
+	if netutil.ListenHostIsLoopback(s.cfg.Listen) {
+		s.log.Warn("tunnel listen is loopback-only; remote Agents cannot connect — use listen: \":8443\" on a public VPS")
+	}
 
 	for _, t := range s.cfg.Tunnels {
 		switch t.Type {
