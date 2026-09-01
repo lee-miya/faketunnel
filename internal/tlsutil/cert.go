@@ -17,7 +17,6 @@ import (
 )
 
 const ALPN = "faketunnel/1"
-const LegacyALPN = "mytunnel/1"
 
 // GenerateSelfSigned returns PEM-encoded cert and key for the given hosts
 // (DNS names or IP addresses).
@@ -121,7 +120,7 @@ func ServerConfig(cert tls.Certificate) *tls.Config {
 	return &tls.Config{
 		Certificates: []tls.Certificate{cert},
 		MinVersion:   tls.VersionTLS12,
-		NextProtos:   []string{ALPN, LegacyALPN},
+		NextProtos:   []string{ALPN},
 	}
 }
 
@@ -134,8 +133,8 @@ func HTTPSConfig(cert tls.Certificate) *tls.Config {
 	}
 }
 
-// ClientConfig builds a TLS 1.2+ client config. ALPN is omitted so mixed
-// Edge/Agent versions still complete the handshake; token auth follows TLS.
+// ClientConfig builds a TLS 1.2+ client config. ALPN is omitted so the
+// handshake does not depend on protocol-name negotiation; token auth follows TLS.
 func ClientConfig(caPath, serverName string, insecure bool) (*tls.Config, error) {
 	cfg := &tls.Config{
 		MinVersion:         tls.VersionTLS12,

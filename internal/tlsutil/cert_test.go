@@ -167,68 +167,6 @@ func TestDialConfigVerifiesCAWithoutSNI(t *testing.T) {
 	mustHandshake(t, ServerConfig(cert), cfg)
 }
 
-func TestHandshakeLegacyAgentToNewEdge(t *testing.T) {
-	t.Parallel()
-	cert := mustSelfSigned(t)
-	mustHandshake(t, ServerConfig(cert), &tls.Config{
-		MinVersion:         tls.VersionTLS12,
-		InsecureSkipVerify: true,
-		ServerName:         "localhost",
-		NextProtos:         []string{LegacyALPN},
-	})
-}
-
-func TestHandshakeNewAgentToLegacyEdge(t *testing.T) {
-	t.Parallel()
-	cert := mustSelfSigned(t)
-	clientCfg, err := ClientConfig("", "localhost", true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	mustHandshake(t, &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		MinVersion:   tls.VersionTLS12,
-		NextProtos:   []string{LegacyALPN},
-	}, clientCfg)
-}
-
-func TestHandshakeMismatchedALPNFails(t *testing.T) {
-	t.Parallel()
-	cert := mustSelfSigned(t)
-	serverCfg := &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		MinVersion:   tls.VersionTLS12,
-		NextProtos:   []string{LegacyALPN},
-	}
-	clientCfg := &tls.Config{
-		MinVersion:         tls.VersionTLS12,
-		InsecureSkipVerify: true,
-		ServerName:         "localhost",
-		NextProtos:         []string{ALPN},
-	}
-	ln, err := tls.Listen("tcp", "127.0.0.1:0", serverCfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
-	go func() {
-		c, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		defer c.Close()
-		if tc, ok := c.(*tls.Conn); ok {
-			_ = tc.Handshake()
-		}
-	}()
-	d := &tls.Dialer{Config: clientCfg}
-	c, err := d.Dial("tcp", ln.Addr().String())
-	if err == nil {
-		c.Close()
-		t.Fatal("expected ALPN mismatch to fail handshake")
-	}
-}
-
 func mustSelfSigned(t *testing.T) tls.Certificate {
 	t.Helper()
 	certPEM, keyPEM, err := GenerateSelfSigned([]string{"localhost", "127.0.0.1"}, time.Hour)
