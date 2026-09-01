@@ -403,21 +403,17 @@ func (s *Server) serveTunnel(ctx context.Context) {
 			if errors.Is(err, net.ErrClosed) {
 				return
 			}
-			if ne, ok := err.(net.Error); ok && ne.Temporary() {
-				if tempDelay == 0 {
-					tempDelay = 5 * time.Millisecond
-				} else {
-					tempDelay *= 2
-				}
-				if max := 1 * time.Second; tempDelay > max {
-					tempDelay = max
-				}
-				s.log.Warn("tunnel accept temporary error", "err", err, "retry_in", tempDelay)
-				time.Sleep(tempDelay)
-				continue
+			if tempDelay == 0 {
+				tempDelay = 5 * time.Millisecond
+			} else {
+				tempDelay *= 2
 			}
-			s.log.Debug("tunnel accept", "err", err)
-			return
+			if max := 1 * time.Second; tempDelay > max {
+				tempDelay = max
+			}
+			s.log.Warn("tunnel accept", "err", err, "retry_in", tempDelay)
+			time.Sleep(tempDelay)
+			continue
 		}
 		tempDelay = 0
 		s.wg.Add(1)
@@ -430,6 +426,12 @@ func (s *Server) serveTunnel(ctx context.Context) {
 
 func (s *Server) handleAgent(conn net.Conn) {
 	defer conn.Close()
+	if tc, ok := conn.(*tls.Conn); ok {
+		if err := tc.Handshake(); err != nil {
+			s.log.Warn("agent tls handshake failed", "remote", conn.RemoteAddr().String(), "err", err)
+			return
+		}
+	}
 	agentID, err := tunnel.ServerHandshake(conn, s.cfg.Token, 0)
 	if err != nil {
 		s.log.Warn("agent handshake failed", "remote", conn.RemoteAddr().String(), "err", err)

@@ -117,6 +117,8 @@ func LoadOrGenerate(certPath, keyPath string, auto bool, hosts []string) (tls.Ce
 }
 
 // ServerConfig builds a TLS 1.2+ server config.
+// NextProtos is advertised so old Agents that send ALPN still match; a client
+// that sends no ALPN also succeeds (crypto/tls skips negotiation).
 func ServerConfig(cert tls.Certificate) *tls.Config {
 	return &tls.Config{
 		Certificates: []tls.Certificate{cert},
@@ -135,10 +137,13 @@ func HTTPSConfig(cert tls.Certificate) *tls.Config {
 }
 
 // ClientConfig builds a TLS 1.2+ client config.
+//
+// The client does not advertise ALPN. If both sides send NextProtos and they
+// do not overlap, crypto/tls aborts the handshake (often as EOF). Token auth
+// identifies the tunnel after TLS, so ALPN is not required on the client.
 func ClientConfig(caPath, serverName string, insecure bool) (*tls.Config, error) {
 	cfg := &tls.Config{
 		MinVersion:         tls.VersionTLS12,
-		NextProtos:         []string{ALPN, LegacyALPN},
 		InsecureSkipVerify: insecure,
 		ServerName:         serverName,
 	}

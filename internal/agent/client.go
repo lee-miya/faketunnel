@@ -82,15 +82,18 @@ func (c *Client) Run(ctx context.Context) error {
 }
 
 func (c *Client) connectOnce(ctx context.Context) (bool, error) {
-	dialer := &tls.Dialer{
-		NetDialer: &net.Dialer{Timeout: c.cfg.DialOrDefault()},
-		Config:    c.tls,
-	}
+	d := &net.Dialer{Timeout: c.cfg.DialOrDefault()}
 	c.log.Info("dialing edge", "addr", c.cfg.Edge)
-	conn, err := dialer.DialContext(ctx, "tcp", c.cfg.Edge)
+	raw, err := d.DialContext(ctx, "tcp", c.cfg.Edge)
 	if err != nil {
 		return false, fmt.Errorf("dial: %w", err)
 	}
+	tlsConn := tls.Client(raw, c.tls)
+	if err := tlsConn.HandshakeContext(ctx); err != nil {
+		_ = raw.Close()
+		return false, fmt.Errorf("tls handshake: %w", err)
+	}
+	conn := net.Conn(tlsConn)
 	defer conn.Close()
 
 	id := c.cfg.AgentID
