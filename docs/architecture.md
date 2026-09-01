@@ -2,7 +2,7 @@
 
 ## 角色
 
-- **Edge**：跑在公网 VPS。监听 Agent 隧道口（TLS）以及各 TCP / HTTP(S) / UDP 公网端口。入站连接先做 IP allowlist，命中后经 yamux 交给 Agent。
+- **Edge**：跑在公网 VPS。监听 Agent 隧道口（TLS，`listen`，默认 `:8443`，**可改**；公网建议避开 8443 等常被扫描的端口）以及各 TCP / HTTP(S) / UDP 公网端口。Agent 的 `edge` 必须指向同一端口。入站业务连接先做 IP allowlist，命中后经 yamux 交给 Agent。已封禁 IP 在隧道口直接拒断。
 - **Agent**：只出站连接 Edge（NAT/防火墙友好）。默认按 Edge 在 OpenStream 里下发的 `local` 拨号（本机环回或内网 `IP:端口`）；配置里仍可列出 tunnels 作为允许名单或覆盖目标。
 - **Allowlist**：Edge 本地 JSON 文件 + 内存原子替换；Admin API / CLI 写盘后立即生效，无需重启。文件缺失时默认写入环回。
 - **Denylist**：同一 IP 连续 5 次无效（业务口 ACL deny、**隧道口 TLS/token 失败**、或 Admin 鉴权失败）临时封禁 6 小时；第二次封禁永久。持久化 `denylist.json`。
@@ -20,7 +20,7 @@ Admin CLI/API --Bearer--> Edge admin port → allowlist.json / denylist.json
 | 层 | 行为 |
 |---|---|
 | 隧道身份 | Agent 在 TLS 之后发送预共享 token；失败不进入 yamux |
-| 访问控制 | 取 `RemoteAddr`（可选 PROXY protocol v1）；默认 deny；连续 5 次无效 → 6h 临时封禁，第二次永久 |
+| 访问控制 | 取 `RemoteAddr`（可选 PROXY protocol v1）；业务口默认 deny；隧道口 TLS/token 失败与 Admin 错口令同样计入；连续 5 次无效 → 6h 临时封禁，第二次永久 |
 | 管理面 | Admin 独立 `listen` + Bearer；环回明文 HTTP，非环回强制 HTTPS（复用 Edge 证书）；错误口令计入封禁；审计日志记录 actor/动作/CIDR |
 | 传输 | 隧道 TLS 1.2+，ALPN `faketunnel/1`；公网 HTTPS 终止用独立证书（无 faketunnel ALPN）；`passthrough` 时公网 TLS 直达源站；公网 Admin 为 HTTPS `http/1.1` |
 | 最小暴露 | Agent 无入站端口；本地目标默认仅回环 / RFC1918 / ULA |

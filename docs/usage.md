@@ -8,7 +8,7 @@ fakeTunnel 把家里或内网的 TCP / HTTP / UDP 服务，通过一台公网 VP
 
 | 进程 | 跑在哪 | 职责 |
 |------|--------|------|
-| **Edge** | 公网 VPS | 听隧道口（TLS）和各业务端口；先做 allowlist，再经 yamux 交给 Agent |
+| **Edge** | 公网 VPS | 听隧道口（TLS，`listen`，默认 `:8443`，**可改**）和各业务端口；先做 allowlist，再经 yamux 交给 Agent |
 | **Agent** | 能访问源站的机器（常与源站同机，也可在同一内网的另一台） | **只出站**连 Edge（NAT/防火墙友好），拨到配置的 `local` |
 | **faketunnel CLI** | 运维机 | 生成配置；调 Admin API 改 allowlist / denylist、看状态（热更新，不必重启 Edge） |
 
@@ -17,7 +17,7 @@ fakeTunnel 把家里或内网的 TCP / HTTP / UDP 服务，通过一台公网 VP
 ```
 访问者 --TCP/HTTP(S)/UDP--> Edge(VPS) --TLS+yamux--> Agent --TCP/UDP--> local（本机或内网）
                  allowlist 未命中 → TCP RST / HTTP 403 / UDP 丢弃
-                 连续 5 次无效 → 临时封禁 6 小时；同一 IP 第二次封禁 → 永久
+                 业务口 / 隧道口 / Admin 连续 5 次无效 → 临时封禁 6 小时；同一 IP 第二次封禁 → 永久
 ```
 
 `local` 默认是 Agent 本机环回（`127.0.0.1:端口`）。Agent 与源站不在同一台时，把 `local` 写成内网 `IP:端口` 即可，见 [5.7](#57-agent-与源站不在同一台同一内网)。
@@ -210,7 +210,7 @@ curl http://127.0.0.1:8080/healthz
 python3 -c 'import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.settimeout(2); s.sendto(b"hello-udp",("127.0.0.1",5354)); print(s.recvfrom(64))'
 ```
 
-未在 allowlist 中的源 IP：TCP 尽量 RST；明文 HTTP 回 **403**；TLS 端口直接断开；UDP 丢弃。连续 5 次无效会临时封禁 6 小时（日志 `ip temp banned`）。
+未在 allowlist 中的源 IP：TCP 尽量 RST；明文 HTTP 回 **403**；TLS 端口直接断开；UDP 丢弃。业务口 ACL、隧道口 TLS/token、Admin 口令连续 5 次无效会临时封禁 6 小时（日志 `ip temp banned`），详见 [6.1](#61-无效请求与-ip-封禁)。
 
 ### 4.4 热更新 allowlist
 
@@ -231,7 +231,7 @@ export FAKETUNNEL_TOKEN=admin-dev-token-change-me
 
 ```bash
 ./bin/faketunnel init -dir /opt/faketunnel/configs -edge VPS_IP -listen :27443 -http 8080:3000 -tcp 2222
-./bin/faketunnel init -dir ./configs -edge VPS_IP -preset gitea
+./bin/faketunnel init -dir ./configs -edge VPS_IP -listen :27443 -preset gitea
 ```
 
 写出 `edge.yaml`、`agent.yaml`（含 token，拷到 Agent 机器即可）、`token`、`admin.token`、`allowlist.json`。已有文件需加 `-force`。
@@ -266,6 +266,7 @@ export FAKETUNNEL_TOKEN=admin-dev-token-change-me
 
 ```yaml
 # edge.yaml
+listen: ":27443"    # Agent 来连的隧道口；省略则为 :8443。公网请改成不常见端口
 token: "..."
 tunnels:
   - type: http
@@ -275,7 +276,7 @@ tunnels:
 
 ```yaml
 # agent.yaml — 不必列 tunnels
-edge: "VPS_IP:8443"
+edge: "VPS_IP:27443"   # 端口必须与 Edge 的 listen 一致（默认 8443；公网请改）
 token: "..."
 ```
 
@@ -284,9 +285,10 @@ token: "..."
 | 字段 | 纯数字 | 完整写法 |
 |------|--------|----------|
 | `listen` / `tunnels[].public` / `admin.listen` | `8080` → `:8080`（所有网卡） | `127.0.0.1:8080`、`[::]:8080` |
+| `edge`（Agent） | `8443` → `127.0.0.1:8443` | `VPS_IP:27443`（须与 Edge `listen` 端口一致） |
 | `tunnels[].local` | `3000` → `127.0.0.1:3000` | `192.168.1.50:3000`、`[::1]:3000` |
 
-`0.0.0.0` 只听 IPv4；IPv6 用 `[::]:端口`（Linux 上常双栈）。
+`0.0.0.0` 只听 IPv4；IPv6 用 `[::]:端口`（Linux 上常双栈）。Agent 的 `edge` 只写主机名或 IP、不写端口时，会拼上默认隧道口 **8443**；若 Edge `listen` 不是 8443，必须写成 `主机:端口`。
 
 ### 5.3 隧道 name（可省略）
 
@@ -344,6 +346,8 @@ Agent 若列出 `tunnels`：按 `name` 作为**允许名单**（未列出的隧�
 
 启用 Admin 时必须能落到 `allowlist_file` 和 Admin token（均可由默认值补齐）。
 
+公网把 `listen` 改成不常见端口后，防火墙放行该端口，并把 Agent 的 `edge` 改成 `VPS_IP:同一端口`。只改一边会导致 Agent 连不上。
+
 文件不存在且 YAML 也未写 `allowlist` 时，会创建仅含 `127.0.0.1/32` 与 `::1/128` 的文件（本机可测、外网仍拒绝）。要拒绝包括本机在内的全部连接，写 `{"cidrs":[]}`。
 
 ### 5.6 Agent 专用
@@ -380,7 +384,7 @@ tunnels:
 
 ```yaml
 # agent.yaml
-edge: "VPS_IP:8443"
+edge: "VPS_IP:27443"   # 须与 Edge listen 端口一致
 token: "..."
 tunnels:
   - name: http-8080          # 与 Edge 自动名一致，或两边都显式写 name
@@ -432,7 +436,7 @@ tunnels:
 
 ```yaml
 # edge.yaml
-listen: ":8443"
+listen: ":27443"              # Agent 来连的隧道口；公网不要长期用 8443
 token_file: token
 log_level: info
 log_format: json
@@ -461,7 +465,7 @@ tunnels:
 
 ```yaml
 # agent.yaml
-edge: "VPS_IP:8443"
+edge: "VPS_IP:27443"          # 端口与 Edge listen 一致
 token_file: token
 # agent_id: home
 # local_private_only: true
@@ -490,9 +494,15 @@ tls:
 
 ### 6.1 无效请求与 IP 封禁
 
-业务口（TCP / HTTP / UDP）上，源 IP 不在 allowlist 记一次**无效**。Admin 上 Bearer 错误同样记一次无效。同一 IP **连续 5 次**无效：
+下列情况各记一次**无效**：
 
-1. **第一次**：临时封禁 **6 小时**（该 IP 的业务口直接拒绝，日志 `ip temp banned`）
+- **业务口**（TCP / HTTP / UDP）：源 IP 不在 allowlist
+- **隧道口**（`listen`，Agent 来连的 TLS 口）：TLS 握手失败或 token 错误
+- **Admin**：Bearer 错误
+
+同一 IP **连续 5 次**无效：
+
+1. **第一次**：临时封禁 **6 小时**（该 IP 的业务口与隧道口直接拒绝，日志 `ip temp banned`）
 2. **解禁后再连续 5 次**：永久封禁（日志 `ip permanently banned`）
 
 封禁优先于 allowlist：被封的 IP 即使后来被加进白名单，也要先 `denylist rm` 或用 `allowlist add` / `add-self`（会顺带解封该 IP）。临时封禁到期后计数清零，但「已封过一次」会记在 `denylist.json` 里，所以第二次仍会永封。
@@ -608,7 +618,7 @@ export FAKETUNNEL_TOKEN='<admin.token 内容>'
 推荐：
 
 ```bash
-./bin/faketunnel init -dir /opt/faketunnel/configs -edge VPS_IP -http 8080:3000
+./bin/faketunnel init -dir /opt/faketunnel/configs -edge VPS_IP -listen :27443 -http 8080:3000
 ```
 
 会生成 32 字节 hex 的隧道 token 与 Admin token（文件权限 `0600`）。也可以手写：
@@ -620,7 +630,7 @@ openssl rand -hex 32   # Admin token，必须不同
 
 生产关闭跳过校验：把 Edge 配置目录下 `certs/edge.crt` 拷到 Agent，设 `tls.ca` 与 `insecure_skip_verify: false`。隧道 TLS 也可用 Let’s Encrypt 等正式证书，把 `auto_self_signed` 设为 false 并填写 `tls.cert` / `tls.key`。
 
-**隧道证书只加密 Agent ↔ Edge 的 `listen` 口，不是给浏览器访问业务口的。** 访问者走的 HTTP/SSH 看不到 `edge.crt`。自签 SAN 含 `localhost` / `127.0.0.1` / `::1`，Agent 的 `server_name` 保持 `localhost`，`edge:` 仍填真实 `VPS_IP:8443`。
+**隧道证书只加密 Agent ↔ Edge 的 `listen` 口，不是给浏览器访问业务口的。** 访问者走的 HTTP/SSH 看不到 `edge.crt`。自签 SAN 含 `localhost` / `127.0.0.1` / `::1`，Agent 的 `server_name` 保持 `localhost`，`edge:` 填真实 `VPS_IP` 加与 `listen` 相同的端口。
 
 ### 8.2 监听与防火墙
 
@@ -670,7 +680,7 @@ journalctl -u faketunnel-agent -f
 
 | 现象 | 常见原因 |
 |------|----------|
-| Agent `dial: ... connection refused` | Edge 未启动；`edge:` 写成了业务口而不是隧道口；防火墙未放行 8443 |
+| Agent `dial: ... connection refused` | Edge 未启动；`edge:` 写成了业务口而不是隧道口；防火墙未放行 `listen` 端口；Edge `listen` 与 Agent `edge` 端口不一致 |
 | Agent `auth rejected` / Edge `handshake failed` | 两端 `token` 不一致；复制时多了换行（用 `token_file`） |
 | Agent `certificate` 错误 | 设了 `insecure_skip_verify: false` 但未配 `ca`，或 `server_name` 与证书 CN/SAN 不符（自签默认 `localhost`） |
 | HTTP 403 | 访问者公网 IP 不在 allowlist，或已被临时 / 永久封禁（看 `acl deny` / `ip temp banned`） |
@@ -703,7 +713,7 @@ curl -s https://ifconfig.me
 ## 10. 安全注意
 
 - Allowlist 默认 deny；不要为图省事写成 `0.0.0.0/0`，除非你清楚源站已有自己的鉴权且接受全网扫描。
-- 同一 IP 连续 5 次无效（业务口未命中 allowlist，或 Admin Bearer 错误）临时封禁 6 小时；第二次封禁永久。记录在 `denylist.json`。
+- 同一 IP 连续 5 次无效（业务口未命中 allowlist、隧道口 TLS/token 失败、或 Admin Bearer 错误）临时封禁 6 小时；第二次封禁永久。记录在 `denylist.json`。
 - Admin 与隧道 token 必须分开。默认只绑环回；对公网开放时强制 HTTPS + 强 token，用 `add-self` 加当前 IP。
 - Agent 不听入站端口。源站同机时只对 localhost 开放；跨机时只对内网、且仅放行 Agent。
 - 自签证书仅用于隧道或实验；浏览器 HTTPS 终止请换正式证书，或改用 `passthrough` 让源站持证。公网 Admin 若用自签，CLI 需 `-insecure`。

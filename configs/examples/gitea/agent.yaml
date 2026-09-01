@@ -1,7 +1,8 @@
 # Gitea 场景：跑在能访问 Gitea 的机器上（常与 Gitea 同机，也可在同一内网的另一台）。
 # 只出站连接 Edge。不必再列 tunnels；Edge 会把 local 目标随每条流下发。
 #
-# 改成 VPS 公网 IP 或域名（隧道口 8443，不是业务口 8080）。
+# 改成 VPS 公网 IP 或域名。端口必须与 Edge 的 listen 一致（不是业务口 8080）。
+# 公网 Edge 若把 listen 改成 :27443，这里写成 "VPS_IP:27443"。
 # 跨机时不要在本文件写 local，去改 Edge 的 local 为 "GITEA_LAN_IP:3000"。
 # 若在这里覆盖 local，必须写出与 Edge 一致的 name，且两条隧道都要列，见 docs/scenarios/gitea.md。
 

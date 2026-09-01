@@ -11,7 +11,7 @@
 - **🔒 单向出站建连**：Agent 仅需出站发起 TLS 握手连接 Edge，内网无需公网 IP、动态域名或路由器端口映射。
 - **🛡️ 严格安全防护**：
   - **IP Allowlist**：Edge 端口转发前强制执行 CIDR 白名单过滤（默认仅允许环回）。
-  - **主动防爆破与封禁**：非白名单连续扫描 5 次自动触发 6 小时临时封禁，二次触发永久封禁。
+  - **主动防爆破与封禁**：业务口非白名单、**隧道口 TLS/token 失败**、或 Admin 口令错误，同一 IP 连续 5 次自动触发 6 小时临时封禁，二次触发永久封禁。
   - **私网目标限制**：Agent 默认仅允许转发至内网与环回目标，防止内网横向越权。
 - **🌐 全协议穿透支持**：
   - **TCP 端口转发**：支持 SSH、数据库、Git 等通用 TCP 协议。
@@ -33,7 +33,7 @@
           │ (TCP / HTTP / UDP)
           ▼
    ┌──────────────┐
-   │  Edge 服务   │  (运行于公网 VPS，监听业务端口与 Admin API)
+   │  Edge 服务   │  (公网 VPS：业务口 + 可配的 TLS 隧道口 listen)
    │ (IP 白名单)  │
    └──────▲───────┘
           │ (单向出站 TLS 隧道 / Yamux 多路复用)
@@ -69,7 +69,8 @@ make test
 
 ```bash
 # 在当前目录下生成 configs/edge.yaml 和 configs/agent.yaml
-./bin/faketunnel init -dir ./configs -edge <VPS_IP> -http 8080:3000 -tcp 2222
+# -listen 是 Agent 来连的隧道口（默认 :8443）。公网建议改成不常见端口，并与 agent.yaml 的 edge 端口一致。
+./bin/faketunnel init -dir ./configs -edge <VPS_IP> -listen :27443 -http 8080:3000 -tcp 2222
 ```
 
 ### 3. 启动服务

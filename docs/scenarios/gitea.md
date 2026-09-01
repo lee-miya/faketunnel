@@ -95,13 +95,14 @@ ss -lnt | grep -E '3000|2222'
 ```bash
 mkdir -p /opt/faketunnel/{bin,configs}
 # 若还没 init：
-./bin/faketunnel init -dir /opt/faketunnel/configs -edge VPS_IP -preset gitea
+./bin/faketunnel init -dir /opt/faketunnel/configs -edge VPS_IP -listen :27443 -preset gitea
 cp bin/edge bin/faketunnel /opt/faketunnel/bin/
 ```
 
 生成的 `edge.yaml` 类似：
 
 ```yaml
+listen: ":27443"         # 与 init -listen 一致；公网不要长期用 8443
 token_file: token
 tunnels:
   - type: http
@@ -114,7 +115,7 @@ tunnels:
 
 不必写 `name`：省略时内部自动为 `http-8080`、`tcp-2222`，**不会写回 YAML**。只有 Agent 也手写 tunnels 时才需要对上这个名字，见 [usage.md 第 5.3 节](../usage.md#53-隧道-name可省略)。
 
-不要给 HTTP 隧道加 `host`，否则无法用 IP 访问。`listen`、TLS 自签证书、Admin 口、allowlist 文件都会用默认值。证书写在**配置文件旁**的 `certs/edge.crt`（首次启动自动生成），不必再改相对路径。
+不要给 HTTP 隧道加 `host`，否则无法用 IP 访问。`listen` 已由 `-listen` 写入（默认 `:8443`，公网请改）。TLS 自签证书、Admin 口、allowlist 文件仍用默认值。证书写在**配置文件旁**的 `certs/edge.crt`（首次启动自动生成），不必再改相对路径。Agent 的 `edge` 端口必须与 `listen` 相同。
 
 Agent 与 Gitea 不在同一台时，把上面的 `local` 改成 `"GITEA_LAN_IP:3000"` / `"GITEA_LAN_IP:2222"`（见 5.2），然后重启 Edge。
 
@@ -318,7 +319,7 @@ export FAKETUNNEL_TOKEN='<Admin token>'
 
 Edge 需设置 `admin.listen: ":9090"`（详见 [usage.md 6.3](../usage.md)）。自签证书必须加 `-insecure`。
 
-未在 allowlist 中的 IP 连续探测 5 次会被封 6 小时（日志 `ip temp banned`）；同一 IP 第二次封禁则永久。解封：`faketunnel denylist rm IP`，或再次 `allowlist add` / `add-self`。
+未在 allowlist 中的 IP、隧道口 TLS/token 失败、或 Admin 口令错误，连续 5 次会被封 6 小时（日志 `ip temp banned`）；同一 IP 第二次封禁则永久。解封：`faketunnel denylist rm IP`，或再次 `allowlist add` / `add-self`。
 
 ### 6.3 确认文件已保存
 
@@ -401,7 +402,8 @@ git clone ssh://git@VPS_IP:2222/user/repo.git
 | 现象 | 处理 |
 |------|------|
 | 浏览器一直转圈 / 连接被重置 | IP 未加白名单。在访问者机器查出口 IP，与 `allowlist list` 对比。公司网络可能用 NAT 池，需加整个出口段 |
-| 502 no agent | VPS 上看 Edge 日志是否 `agent connected`；家里 Agent 是否在跑；`edge:` 是否写成了 `:8080` |
+| 502 no agent | VPS 上看 Edge 日志是否 `agent connected`；家里 Agent 是否在跑；`edge:` 是否写成了业务口，或端口与 Edge `listen` 不一致 |
+| Agent `connection refused` / 连不上 | 防火墙未放行 `listen` 端口；Edge 未启动；`listen` 与 `edge` 端口不一致 |
 | `local dial` 失败 / 连接被拒绝 | 源站没监听；或 Agent 在另一台而 Gitea 仍绑 `127.0.0.1`；或内网防火墙未放行 |
 | `unknown tunnel` | Agent 手写了 `tunnels` 但 `name` 与 Edge 不一致，或漏列了 SSH 那条 |
 | Agent `certificate` / x509 错误 | 设了 `insecure_skip_verify: false` 但 `tls.ca` 不是 Edge 的 `certs/edge.crt`；或 `server_name` 与证书 SAN 不符（自签默认 `localhost`） |

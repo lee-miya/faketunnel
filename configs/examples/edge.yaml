@@ -6,6 +6,7 @@
 # 源站准备与 curl 示例见 docs/usage.md 第 4 节。
 #
 # 未写出的项使用默认值：Admin 127.0.0.1:9090、allowlist.json、隧道 TLS 自签证书。
+# listen 是 Agent 来连的 TLS 隧道口。本机回环可用 8443；公网请用 init -listen 改成不常见端口。
 # 证书生成在本文件旁：configs/examples/certs/edge.crt（不是仓库根下的 configs/certs/）。
 # 隧道 name 可省略；这里写上是为了日志和 Agent 覆盖时好看。
 # 占位 token 仅供本机试用，上公网前必须更换。
