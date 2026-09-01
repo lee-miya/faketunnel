@@ -160,3 +160,47 @@ func ClientConfig(caPath, serverName string, insecure bool) (*tls.Config, error)
 	}
 	return cfg, nil
 }
+
+// DialConfig returns a per-dial TLS config for addr.
+//
+// A ClientHello with SNI "localhost" aimed at a public IP is dropped by some
+// firewalls and TLS frontends (Agent sees handshake EOF). When addr is a
+// non-loopback IP, SNI is omitted; certificate checks still use ServerName.
+func DialConfig(base *tls.Config, addr string) *tls.Config {
+	cfg := base.Clone()
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return cfg
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || ip.IsLoopback() {
+		return cfg
+	}
+	verifyName := cfg.ServerName
+	roots := cfg.RootCAs
+	skip := cfg.InsecureSkipVerify
+	cfg.ServerName = ""
+	if skip {
+		return cfg
+	}
+	if verifyName == "" {
+		verifyName = "localhost"
+	}
+	cfg.InsecureSkipVerify = true
+	cfg.VerifyConnection = func(cs tls.ConnectionState) error {
+		if len(cs.PeerCertificates) == 0 {
+			return fmt.Errorf("tls: peer sent no certificates")
+		}
+		opts := x509.VerifyOptions{
+			DNSName:       verifyName,
+			Roots:         roots,
+			Intermediates: x509.NewCertPool(),
+		}
+		for _, c := range cs.PeerCertificates[1:] {
+			opts.Intermediates.AddCert(c)
+		}
+		_, err := cs.PeerCertificates[0].Verify(opts)
+		return err
+	}
+	return cfg
+}

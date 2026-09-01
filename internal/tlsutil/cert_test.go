@@ -122,6 +122,51 @@ func TestHandshakeEmptyServerName(t *testing.T) {
 	mustHandshake(t, ServerConfig(cert), clientCfg)
 }
 
+func TestDialConfigOmitsSNIForPublicIP(t *testing.T) {
+	t.Parallel()
+	base, err := ClientConfig("", "localhost", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := DialConfig(base, "203.0.113.10:8443")
+	if cfg.ServerName != "" {
+		t.Fatalf("sni=%q; want empty for public IP", cfg.ServerName)
+	}
+	loop := DialConfig(base, "127.0.0.1:8443")
+	if loop.ServerName != "localhost" {
+		t.Fatalf("loopback sni=%q; want localhost", loop.ServerName)
+	}
+}
+
+func TestDialConfigVerifiesCAWithoutSNI(t *testing.T) {
+	t.Parallel()
+	certPEM, keyPEM, err := GenerateSelfSigned([]string{"localhost", "127.0.0.1"}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	caPath := filepath.Join(dir, "ca.pem")
+	if err := os.WriteFile(caPath, certPEM, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	base, err := ClientConfig(caPath, "localhost", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := DialConfig(base, "203.0.113.10:8443")
+	if cfg.ServerName != "" {
+		t.Fatalf("sni=%q; want empty", cfg.ServerName)
+	}
+	if cfg.VerifyConnection == nil {
+		t.Fatal("expected VerifyConnection so CA still applies")
+	}
+	mustHandshake(t, ServerConfig(cert), cfg)
+}
+
 func TestHandshakeLegacyAgentToNewEdge(t *testing.T) {
 	t.Parallel()
 	cert := mustSelfSigned(t)
