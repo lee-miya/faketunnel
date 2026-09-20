@@ -9,6 +9,54 @@ import (
 	"time"
 )
 
+func TestMuxConfigDoesNotKillTunnelOnSlowWrites(t *testing.T) {
+	t.Parallel()
+	c := muxConfig()
+	if c.EnableKeepAlive {
+		t.Fatal("yamux keepalive must be disabled: ping timeout closes the whole tunnel during large HTTP bodies")
+	}
+	if c.StreamOpenTimeout != 0 {
+		t.Fatalf("StreamOpenTimeout=%s; must be 0 so one pending stream cannot close the session", c.StreamOpenTimeout)
+	}
+	if c.ConnectionWriteTimeout < time.Minute {
+		t.Fatalf("ConnectionWriteTimeout=%s; too short for git/LFS over a slow uplink", c.ConnectionWriteTimeout)
+	}
+}
+
+func TestFastCloseUnblocksPipeWrite(t *testing.T) {
+	t.Parallel()
+	a, b := net.Pipe()
+	defer b.Close()
+	wrapped := prepareMuxConn(a)
+
+	started := make(chan struct{})
+	errc := make(chan error, 1)
+	go func() {
+		close(started)
+		buf := make([]byte, 32*1024)
+		_, err := wrapped.Write(buf)
+		errc <- err
+	}()
+	<-started
+	time.Sleep(20 * time.Millisecond)
+
+	done := make(chan struct{})
+	go func() {
+		_ = wrapped.Close()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fastCloseConn.Close blocked")
+	}
+	select {
+	case <-errc:
+	case <-time.After(2 * time.Second):
+		t.Fatal("write was not unblocked by Close")
+	}
+}
+
 func TestYamuxOpenData(t *testing.T) {
 	t.Parallel()
 	a, b := net.Pipe()

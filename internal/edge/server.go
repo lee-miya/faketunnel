@@ -363,7 +363,7 @@ func (s *Server) setSession(sess *tunnel.Session) {
 	s.sess = sess
 	s.mu.Unlock()
 	if old != nil && old != sess {
-		_ = old.Close()
+		safe.Go(s.log, "close-old-session", func() { _ = old.Close() })
 	}
 	s.reg.SetAgentConnected(true)
 	s.log.Info("agent session ready")

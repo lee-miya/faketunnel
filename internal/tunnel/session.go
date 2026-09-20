@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/hashicorp/yamux"
@@ -14,6 +15,12 @@ const (
 	PingInterval = 15 * time.Second
 	PingTimeout  = 45 * time.Second
 	OpenTimeout  = 15 * time.Second
+
+	// closeWait is how long Session.Close waits for yamux/TLS teardown.
+	// A blocked tls.Conn.Close used to stall Agent reconnect for minutes.
+	closeWait = 2 * time.Second
+
+	tcpKeepAlivePeriod = 30 * time.Second
 )
 
 // Session is a yamux session on an authenticated TLS connection.
@@ -24,10 +31,63 @@ type Session struct {
 
 func muxConfig() *yamux.Config {
 	c := yamux.DefaultConfig()
-	c.EnableKeepAlive = true
+	// Yamux keepalive Ping shares the multiplexer's send loop. A large HTTP
+	// body (Gitea git pack / page assets) can occupy that loop longer than
+	// the default 10s ConnectionWriteTimeout; the ping then fails and yamux
+	// tears down the whole tunnel. Application Ping/Pong still measures RTT;
+	// TCP keepalive detects a dead peer.
+	c.EnableKeepAlive = false
 	c.KeepAliveInterval = 30 * time.Second
+	c.ConnectionWriteTimeout = 5 * time.Minute
+	c.MaxStreamWindowSize = 1 << 20
+	c.StreamOpenTimeout = 0
+	c.StreamCloseTimeout = 10 * time.Second
 	c.LogOutput = io.Discard
 	return c
+}
+
+func prepareMuxConn(conn net.Conn) net.Conn {
+	enableTCPKeepAlive(conn)
+	return &fastCloseConn{Conn: conn}
+}
+
+func enableTCPKeepAlive(conn net.Conn) {
+	cur := conn
+	for i := 0; i < 8 && cur != nil; i++ {
+		if tc, ok := cur.(*net.TCPConn); ok {
+			_ = tc.SetKeepAlive(true)
+			_ = tc.SetKeepAlivePeriod(tcpKeepAlivePeriod)
+			return
+		}
+		nc, ok := cur.(interface{ NetConn() net.Conn })
+		if !ok {
+			return
+		}
+		cur = nc.NetConn()
+	}
+}
+
+// fastCloseConn sets an expired deadline before Close so an in-flight TLS
+// write cannot deadlock session teardown.
+type fastCloseConn struct {
+	net.Conn
+	once sync.Once
+	err  error
+}
+
+func (c *fastCloseConn) Close() error {
+	c.once.Do(func() {
+		_ = c.Conn.SetDeadline(time.Now())
+		c.err = c.Conn.Close()
+	})
+	return c.err
+}
+
+func (c *fastCloseConn) NetConn() net.Conn {
+	if nc, ok := c.Conn.(interface{ NetConn() net.Conn }); ok {
+		return nc.NetConn()
+	}
+	return c.Conn
 }
 
 // ServerSession wraps a connection Edge accepted (yamux server).
@@ -35,7 +95,7 @@ func ServerSession(conn net.Conn, logger *slog.Logger) (*Session, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	mux, err := yamux.Server(conn, muxConfig())
+	mux, err := yamux.Server(prepareMuxConn(conn), muxConfig())
 	if err != nil {
 		return nil, err
 	}
@@ -47,7 +107,7 @@ func ClientSession(conn net.Conn, logger *slog.Logger) (*Session, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	mux, err := yamux.Client(conn, muxConfig())
+	mux, err := yamux.Client(prepareMuxConn(conn), muxConfig())
 	if err != nil {
 		return nil, err
 	}
@@ -58,7 +118,18 @@ func (s *Session) Open() (net.Conn, error) { return s.mux.Open() }
 
 func (s *Session) Accept() (net.Conn, error) { return s.mux.Accept() }
 
-func (s *Session) Close() error { return s.mux.Close() }
+func (s *Session) Close() error {
+	done := make(chan error, 1)
+	go func() {
+		done <- s.mux.Close()
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(closeWait):
+		return nil
+	}
+}
 
 func (s *Session) IsClosed() bool { return s.mux.IsClosed() }
 

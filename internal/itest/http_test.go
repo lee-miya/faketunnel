@@ -255,6 +255,59 @@ func TestEndToEndHTTPForwardedHeaders(t *testing.T) {
 	t.Fatalf("headers: %v", last)
 }
 
+func TestEndToEndHTTPBackendAbortKeepsAgent(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skip e2e in short mode")
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ping", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "ok")
+	})
+	mux.HandleFunc("/abort", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "100")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("short"))
+		if hj, ok := w.(http.Hijacker); ok {
+			conn, _, err := hj.Hijack()
+			if err == nil {
+				_ = conn.Close()
+			}
+		}
+	})
+	hs := &http.Server{Handler: mux}
+	t.Cleanup(func() {
+		_ = hs.Close()
+		_ = ln.Close()
+	})
+	go func() { _ = hs.Serve(ln) }()
+	backend := ln.Addr().String()
+
+	edgeCfg, agentCfg := testPair(t)
+	edgeCfg.Tunnels = []config.Tunnel{{
+		Name: "web", Type: config.TypeHTTP, Public: "127.0.0.1:0", Host: "gitea.example", Local: backend,
+	}}
+	agentCfg.Tunnels = []config.Tunnel{{Name: "web", Type: config.TypeHTTP, Local: backend}}
+	public := startHTTPPair(t, edgeCfg, agentCfg, "web")
+	waitHTTP(t, "http://"+public+"/ping", "gitea.example", http.StatusOK, "ok", 8*time.Second)
+
+	req, err := http.NewRequest(http.MethodGet, "http://"+public+"/abort", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = "gitea.example"
+	resp, err := (&http.Client{Timeout: 3 * time.Second}).Do(req)
+	if err == nil {
+		_, _ = io.ReadAll(resp.Body)
+		resp.Body.Close()
+	}
+
+	waitHTTP(t, "http://"+public+"/ping", "gitea.example", http.StatusOK, "ok", 3*time.Second)
+}
+
 func TestEndToEndHTTPKeepAlive(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skip e2e in short mode")
