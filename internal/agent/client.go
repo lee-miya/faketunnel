@@ -84,7 +84,7 @@ func (c *Client) Run(ctx context.Context) error {
 func (c *Client) connectOnce(ctx context.Context) (bool, error) {
 	d := &net.Dialer{Timeout: c.cfg.DialOrDefault()}
 	tlsCfg := tlsutil.DialConfig(c.tls, c.cfg.Edge)
-	c.log.Info("dialing edge", "addr", c.cfg.Edge)
+	c.log.Info("dialing edge", "addr", c.cfg.Edge, "alpn", strings.Join(tlsCfg.NextProtos, ","))
 	raw, err := d.DialContext(ctx, "tcp", c.cfg.Edge)
 	if err != nil {
 		return false, fmt.Errorf("dial: %w", err)
@@ -94,6 +94,9 @@ func (c *Client) connectOnce(ctx context.Context) (bool, error) {
 	if err := tlsConn.HandshakeContext(ctx); err != nil {
 		_ = raw.Close()
 		return false, fmt.Errorf("tls handshake: %w", err)
+	}
+	if got := tlsConn.ConnectionState().NegotiatedProtocol; got != tlsutil.ALPN {
+		c.log.Warn("tls alpn not negotiated", "got", got, "want", tlsutil.ALPN)
 	}
 	_ = raw.SetDeadline(time.Time{})
 	conn := net.Conn(tlsConn)

@@ -440,11 +440,9 @@ func (s *Server) handleAgent(conn net.Conn) {
 			s.noteTunnelInvalid(ip, remote, classifyTLS(err))
 			return
 		}
-		if proto := tc.ConnectionState().NegotiatedProtocol; proto != tlsutil.ALPN {
-			s.noteTunnelInvalid(ip, remote, fmt.Errorf("%w: alpn %q", tunnel.ErrProbe, proto))
-			return
-		}
 	}
+	// Empty ALPN is not a probe. Older agents omit it, and so do TLS scanners.
+	// The next frame is the check: a tunnel AuthRequest continues, anything else is banned.
 	agentID, err := tunnel.ServerHandshake(conn, s.cfg.Token, 0)
 	if err != nil {
 		s.noteTunnelInvalid(ip, remote, err)

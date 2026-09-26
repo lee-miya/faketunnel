@@ -133,8 +133,8 @@ func HTTPSConfig(cert tls.Certificate) *tls.Config {
 	}
 }
 
-// ClientConfig builds a TLS 1.2+ client config. ALPN is faketunnel/1 so
-// generic HTTPS clients are rejected by Edge before the tunnel handshake.
+// ClientConfig builds a TLS 1.2+ client config. ALPN is faketunnel/1.
+// Edge still accepts a handshake with no ALPN; the tunnel frame distinguishes agents from scanners.
 func ClientConfig(caPath, serverName string, insecure bool) (*tls.Config, error) {
 	cfg := &tls.Config{
 		MinVersion:         tls.VersionTLS12,

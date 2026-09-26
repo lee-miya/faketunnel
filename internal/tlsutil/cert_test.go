@@ -3,6 +3,7 @@ package tlsutil
 import (
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -99,6 +100,59 @@ func TestClientConfigUsesALPN(t *testing.T) {
 	}
 	if len(cfg.NextProtos) != 1 || cfg.NextProtos[0] != ALPN {
 		t.Fatalf("client ALPN %v; want %s", cfg.NextProtos, ALPN)
+	}
+}
+
+func TestDialConfigNegotiatesALPN(t *testing.T) {
+	t.Parallel()
+	cert := mustSelfSigned(t)
+	base, err := ClientConfig("", "localhost", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientCfg := DialConfig(base, "203.0.113.10:8443")
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", ServerConfig(cert))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	errc := make(chan error, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			errc <- err
+			return
+		}
+		defer c.Close()
+		tc := c.(*tls.Conn)
+		if err := tc.Handshake(); err != nil {
+			errc <- err
+			return
+		}
+		if got := tc.ConnectionState().NegotiatedProtocol; got != ALPN {
+			errc <- fmt.Errorf("server alpn %q", got)
+			return
+		}
+		errc <- nil
+	}()
+
+	d := &tls.Dialer{Config: clientCfg}
+	c, err := d.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if got := c.(*tls.Conn).ConnectionState().NegotiatedProtocol; got != ALPN {
+		t.Fatalf("client alpn %q", got)
+	}
+	select {
+	case err := <-errc:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("server hung")
 	}
 }
 
