@@ -2,9 +2,14 @@ package tunnel
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 )
+
+// ErrProbe means the peer did not speak the tunnel protocol.
+// Callers permanently ban that IP. Network errors and bad tokens are not probes.
+var ErrProbe = errors.New("not a tunnel client")
 
 const (
 	Version        = 1
@@ -107,11 +112,11 @@ func ReadFrame(r io.Reader) (*Frame, error) {
 		return nil, err
 	}
 	if hdr[0] != Version {
-		return nil, fmt.Errorf("unsupported protocol version %d", hdr[0])
+		return nil, fmt.Errorf("%w: unsupported protocol version %d", ErrProbe, hdr[0])
 	}
 	n := binary.BigEndian.Uint32(hdr[4:8])
 	if n > MaxPayloadSize {
-		return nil, fmt.Errorf("payload too large: %d", n)
+		return nil, fmt.Errorf("%w: payload too large: %d", ErrProbe, n)
 	}
 	fr := &Frame{Type: Type(hdr[1]), Flags: hdr[2]}
 	if n == 0 {

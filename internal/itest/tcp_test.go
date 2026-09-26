@@ -366,7 +366,7 @@ func TestTunnelPortBanAfterInvalidTLS(t *testing.T) {
 		t.Skip("skip e2e in short mode")
 	}
 	edgeCfg, _ := testPair(t)
-	list, err := acl.New([]string{"127.0.0.1/32", "::1/128"})
+	list, err := acl.New([]string{"203.0.113.10/32"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -386,25 +386,22 @@ func TestTunnelPortBanAfterInvalidTLS(t *testing.T) {
 	if addr == "" {
 		t.Fatal("missing tunnel addr")
 	}
-	for i := 0; i < 5; i++ {
-		c, err := net.DialTimeout("tcp", addr, time.Second)
-		if err != nil {
-			t.Fatal(err)
-		}
-		_, _ = c.Write([]byte("GET / HTTP/1.1\r\n\r\n"))
-		_ = c.Close()
-		time.Sleep(40 * time.Millisecond)
+	c, err := net.DialTimeout("tcp", addr, time.Second)
+	if err != nil {
+		t.Fatal(err)
 	}
+	_, _ = c.Write([]byte("GET / HTTP/1.1\r\n\r\n"))
+	_ = c.Close()
 	deadline := time.Now().Add(2 * time.Second)
 	blocked := false
 	for time.Now().Before(deadline) {
-		if srv.Bans().Blocked(net.ParseIP("127.0.0.1")) || srv.Bans().Blocked(net.ParseIP("::1")) {
+		if srv.Bans().Kind(net.ParseIP("127.0.0.1")) == "permanent" || srv.Bans().Kind(net.ParseIP("::1")) == "permanent" {
 			blocked = true
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 	if !blocked {
-		t.Fatalf("want tunnel temp ban, bans=%v", srv.Bans().List())
+		t.Fatalf("want permanent probe ban, bans=%v", srv.Bans().List())
 	}
 }

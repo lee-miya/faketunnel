@@ -2,6 +2,7 @@ package tunnel
 
 import (
 	"bytes"
+	"errors"
 	"testing"
 )
 
@@ -29,8 +30,9 @@ func TestFrameRoundTrip(t *testing.T) {
 func TestFrameRejectsBadVersion(t *testing.T) {
 	t.Parallel()
 	raw := []byte{99, byte(TypePing), 0, 0, 0, 0, 0, 0}
-	if _, err := ReadFrame(bytes.NewReader(raw)); err == nil {
-		t.Fatal("expected version error")
+	_, err := ReadFrame(bytes.NewReader(raw))
+	if !errors.Is(err, ErrProbe) {
+		t.Fatalf("expected probe, got %v", err)
 	}
 }
 
@@ -39,9 +41,10 @@ func TestFrameRejectsHugePayload(t *testing.T) {
 	if err := WriteFrame(ioDiscard{}, TypePing, make([]byte, MaxPayloadSize+1)); err == nil {
 		t.Fatal("expected too large")
 	}
-	hdr := []byte{Version, byte(TypePing), 0, 0, 0, 1, 0, 0} // 65536
-	if _, err := ReadFrame(bytes.NewReader(hdr)); err == nil {
-		t.Fatal("expected too large")
+	hdr := []byte{Version, byte(TypePing), 0, 0, 0, 1, 0, 1} // 65537
+	_, err := ReadFrame(bytes.NewReader(hdr))
+	if !errors.Is(err, ErrProbe) {
+		t.Fatalf("expected probe, got %v", err)
 	}
 }
 

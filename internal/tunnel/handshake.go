@@ -3,10 +3,14 @@ package tunnel
 import (
 	"crypto/sha256"
 	"crypto/subtle"
+	"errors"
 	"fmt"
 	"net"
 	"time"
 )
+
+// ErrUnauthorized means the peer spoke the tunnel protocol with a wrong token.
+var ErrUnauthorized = errors.New("unauthorized")
 
 const HandshakeTimeout = 10 * time.Second
 
@@ -25,7 +29,7 @@ func ServerHandshake(conn net.Conn, token string, timeout time.Duration) (agentI
 	}
 	if fr.Type != TypeAuthRequest {
 		_ = writeAuth(conn, false, "unauthorized")
-		return "", fmt.Errorf("expected AuthRequest, got %s", fr.Type)
+		return "", fmt.Errorf("%w: expected AuthRequest, got %s", ErrProbe, fr.Type)
 	}
 	req, err := ParseAuthRequest(fr.Payload)
 	if err != nil {
@@ -34,7 +38,7 @@ func ServerHandshake(conn net.Conn, token string, timeout time.Duration) (agentI
 	}
 	if !tokenValid(req.Token, token) {
 		_ = writeAuth(conn, false, "unauthorized")
-		return "", fmt.Errorf("unauthorized")
+		return "", ErrUnauthorized
 	}
 	if err := writeAuth(conn, true, "ok"); err != nil {
 		return "", err

@@ -164,6 +164,41 @@ func TestIPv4Mapped(t *testing.T) {
 	}
 }
 
+func TestStreaksDoNotMix(t *testing.T) {
+	t.Parallel()
+	s := New("", nil)
+	ip := net.ParseIP("203.0.113.60")
+	for i := 0; i < 4; i++ {
+		s.ObserveInvalid(ip, "acl")
+	}
+	s.ObserveInvalid(ip, "auth")
+	if s.Blocked(ip) {
+		t.Fatal("acl and auth streaks must not combine")
+	}
+}
+
+func TestBanPermanent(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "denylist.json")
+	s := New(path, nil)
+	ip := net.ParseIP("203.0.113.70")
+	calls := 0
+	s.OnChange(func() { calls++ })
+	s.BanPermanent(ip, "probe")
+	if s.Kind(ip) != KindPermanent || !s.Blocked(ip) {
+		t.Fatalf("kind=%q blocked=%v", s.Kind(ip), s.Blocked(ip))
+	}
+	s.BanPermanent(ip, "probe")
+	if calls != 1 {
+		t.Fatalf("repeat permanent ban notified %d times", calls)
+	}
+	s2 := New(path, nil)
+	if s2.Kind(ip) != KindPermanent {
+		t.Fatalf("reload kind=%q", s2.Kind(ip))
+	}
+}
+
 func TestBanStoreOnChange(t *testing.T) {
 	t.Parallel()
 	s := New("", nil)

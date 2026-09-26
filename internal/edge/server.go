@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -35,6 +36,7 @@ type Server struct {
 
 	mu       sync.RWMutex
 	sess     *tunnel.Session
+	agentIP  net.IP
 	tunnelLn net.Listener
 	public   map[string]net.Listener
 	httpL    []*httpListener
@@ -432,21 +434,27 @@ func (s *Server) handleAgent(conn net.Conn) {
 		return
 	}
 	_ = conn.SetDeadline(time.Now().Add(tunnel.HandshakeTimeout))
+	remote := conn.RemoteAddr().String()
 	if tc, ok := conn.(*tls.Conn); ok {
 		if err := tc.Handshake(); err != nil {
-			s.noteTunnelInvalid(ip, "tls", conn.RemoteAddr().String(), err)
+			s.noteTunnelInvalid(ip, remote, classifyTLS(err))
+			return
+		}
+		if proto := tc.ConnectionState().NegotiatedProtocol; proto != tlsutil.ALPN {
+			s.noteTunnelInvalid(ip, remote, fmt.Errorf("%w: alpn %q", tunnel.ErrProbe, proto))
 			return
 		}
 	}
 	agentID, err := tunnel.ServerHandshake(conn, s.cfg.Token, 0)
 	if err != nil {
-		s.noteTunnelInvalid(ip, "auth", conn.RemoteAddr().String(), err)
+		s.noteTunnelInvalid(ip, remote, err)
 		return
 	}
 	_ = conn.SetDeadline(time.Time{})
 	if s.bans != nil {
 		s.bans.ObserveValid(ip)
 	}
+	s.rememberAgent(ip)
 	sess, err := tunnel.ServerSession(conn, s.log)
 	if err != nil {
 		s.log.Warn("yamux server", "err", err)
@@ -473,16 +481,66 @@ func (s *Server) handleAgent(conn net.Conn) {
 	<-sess.CloseChan()
 }
 
-func (s *Server) noteTunnelInvalid(ip net.IP, kind, remote string, err error) {
-	s.reg.IncDeny()
-	if s.bans != nil {
-		s.bans.ObserveInvalid(ip, "tunnel")
+func classifyTLS(err error) error {
+	if err == nil {
+		return nil
 	}
-	if kind == "tls" {
-		s.log.Debug("agent tls handshake failed", "remote", remote, "err", err)
+	msg := err.Error()
+	if strings.Contains(msg, "does not look like a TLS handshake") || strings.Contains(msg, "unsupported SSLv2") {
+		return fmt.Errorf("%w: %s", tunnel.ErrProbe, msg)
+	}
+	return err
+}
+
+func (s *Server) noteTunnelInvalid(ip net.IP, remote string, err error) {
+	s.reg.IncDeny()
+	if errors.Is(err, tunnel.ErrProbe) {
+		if s.trustedTunnelIP(ip) {
+			s.log.Debug("tunnel probe from trusted ip", "remote", remote, "err", err)
+			return
+		}
+		if s.bans != nil {
+			s.bans.BanPermanent(ip, "probe")
+		}
 		return
 	}
-	s.log.Warn("agent handshake failed", "remote", remote, "err", err)
+	if errors.Is(err, tunnel.ErrUnauthorized) {
+		if s.trustedTunnelIP(ip) {
+			s.log.Warn("agent handshake failed", "remote", remote, "err", err)
+			return
+		}
+		if s.bans != nil {
+			s.bans.ObserveInvalid(ip, "auth")
+		}
+		s.log.Warn("agent handshake failed", "remote", remote, "err", err)
+		return
+	}
+	s.log.Debug("agent handshake failed", "remote", remote, "err", err)
+}
+
+func (s *Server) rememberAgent(ip net.IP) {
+	if ip == nil {
+		return
+	}
+	cp := make(net.IP, len(ip))
+	copy(cp, ip)
+	s.mu.Lock()
+	s.agentIP = cp
+	s.mu.Unlock()
+}
+
+// trustedTunnelIP is an allowlisted visitor or the last agent that authenticated.
+// Probes and bad tokens from that address are closed, not written to the denylist.
+func (s *Server) trustedTunnelIP(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	if s.acl != nil && s.acl.Allow(ip) {
+		return true
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.agentIP != nil && s.agentIP.Equal(ip)
 }
 
 func (s *Server) servePublic(ctx context.Context, tun config.Tunnel, ln net.Listener) {
@@ -571,6 +629,8 @@ func (s *Server) publicAllowed(ip net.IP, proto, tunnel string) bool {
 		ipStr = ip.String()
 	}
 	s.log.Warn("acl deny", "ip", ipStr, "proto", proto, "tunnel", tunnel)
-	s.bans.ObserveInvalid(ip, "acl")
+	if s.bans != nil && !s.trustedTunnelIP(ip) {
+		s.bans.ObserveInvalid(ip, "acl")
+	}
 	return false
 }

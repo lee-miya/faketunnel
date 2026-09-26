@@ -91,14 +91,14 @@ func TestLoadOrGenerateWritesFiles(t *testing.T) {
 	}
 }
 
-func TestClientConfigOmitsALPN(t *testing.T) {
+func TestClientConfigUsesALPN(t *testing.T) {
 	t.Parallel()
 	cfg, err := ClientConfig("", "localhost", true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cfg.NextProtos) != 0 {
-		t.Fatalf("client ALPN %v; want none", cfg.NextProtos)
+	if len(cfg.NextProtos) != 1 || cfg.NextProtos[0] != ALPN {
+		t.Fatalf("client ALPN %v; want %s", cfg.NextProtos, ALPN)
 	}
 }
 

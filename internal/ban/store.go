@@ -22,6 +22,7 @@ const (
 
 type record struct {
 	Consecutive int       `json:"consecutive"`
+	Reason      string    `json:"reason,omitempty"`
 	Bans        int       `json:"bans"`
 	Until       time.Time `json:"until,omitempty"`
 	Permanent   bool      `json:"permanent"`
@@ -160,6 +161,12 @@ func (s *Store) ObserveInvalid(ip net.IP, reason string) {
 	if !r.Until.IsZero() && !now.Before(r.Until) {
 		r.Until = time.Time{}
 		r.Consecutive = 0
+		r.Reason = ""
+	}
+	// ACL misses and bad tokens do not add up to one streak.
+	if r.Reason != reason {
+		r.Reason = reason
+		r.Consecutive = 0
 	}
 	r.Consecutive++
 	if r.Consecutive < s.limit {
@@ -176,6 +183,39 @@ func (s *Store) ObserveInvalid(ip net.IP, reason string) {
 		r.Until = now.Add(s.ttl)
 		s.log.Warn("ip temp banned", "ip", key, "reason", reason, "until", r.Until.UTC().Format(time.RFC3339), "duration", s.ttl.String())
 	}
+	_ = s.persistLocked()
+	s.mu.Unlock()
+	s.notify()
+}
+
+// BanPermanent blocks ip until an admin unban. A temporary ban is upgraded.
+// Already-permanent IPs are left unchanged.
+func (s *Store) BanPermanent(ip net.IP, reason string) {
+	if s == nil {
+		return
+	}
+	key := ipKey(ip)
+	if key == "" {
+		return
+	}
+	s.mu.Lock()
+	r := s.byIP[key]
+	if r != nil && r.Permanent {
+		s.mu.Unlock()
+		return
+	}
+	if r == nil {
+		r = &record{}
+		s.byIP[key] = r
+	}
+	r.Permanent = true
+	r.Until = time.Time{}
+	r.Consecutive = 0
+	r.Reason = ""
+	if r.Bans < 2 {
+		r.Bans = 2
+	}
+	s.log.Warn("ip permanently banned", "ip", key, "reason", reason, "bans", r.Bans)
 	_ = s.persistLocked()
 	s.mu.Unlock()
 	s.notify()
