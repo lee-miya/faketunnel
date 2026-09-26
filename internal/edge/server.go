@@ -495,6 +495,10 @@ func classifyTLS(err error) error {
 func (s *Server) noteTunnelInvalid(ip net.IP, remote string, err error) {
 	s.reg.IncDeny()
 	if errors.Is(err, tunnel.ErrProbe) {
+		if s.bans != nil && s.bans.Pardoned(ip) {
+			s.log.Warn("tunnel probe rejected", "remote", remote, "err", err)
+			return
+		}
 		if s.trustedTunnelIP(ip) {
 			s.log.Debug("tunnel probe from trusted ip", "remote", remote, "err", err)
 			return
@@ -505,7 +509,7 @@ func (s *Server) noteTunnelInvalid(ip net.IP, remote string, err error) {
 		return
 	}
 	if errors.Is(err, tunnel.ErrUnauthorized) {
-		if s.trustedTunnelIP(ip) {
+		if s.trustedTunnelIP(ip) || (s.bans != nil && s.bans.Pardoned(ip)) {
 			s.log.Warn("agent handshake failed", "remote", remote, "err", err)
 			return
 		}

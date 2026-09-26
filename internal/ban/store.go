@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 )
@@ -29,7 +30,8 @@ type record struct {
 }
 
 type fileDTO struct {
-	Records map[string]record `json:"records"`
+	Records  map[string]record `json:"records"`
+	Pardoned []string          `json:"pardoned,omitempty"`
 }
 
 // Store tracks consecutive invalid events per IP and persists bans.
@@ -41,6 +43,7 @@ type Store struct {
 	ttl       time.Duration
 	limit     int
 	byIP      map[string]*record
+	pardoned  map[string]struct{}
 	onChanges []func()
 }
 
@@ -50,17 +53,33 @@ func New(path string, log *slog.Logger) *Store {
 		log = slog.Default()
 	}
 	s := &Store{
-		path:  path,
-		log:   log,
-		now:   time.Now,
-		ttl:   TempDuration,
-		limit: InvalidLimit,
-		byIP:  make(map[string]*record),
+		path:     path,
+		log:      log,
+		now:      time.Now,
+		ttl:      TempDuration,
+		limit:    InvalidLimit,
+		byIP:     make(map[string]*record),
+		pardoned: make(map[string]struct{}),
 	}
 	if err := s.load(); err != nil {
 		log.Warn("denylist not loaded", "path", path, "err", err)
 	}
 	return s
+}
+
+// Pardoned reports whether an admin unban exempts ip from later automatic bans.
+func (s *Store) Pardoned(ip net.IP) bool {
+	if s == nil {
+		return false
+	}
+	key := ipKey(ip)
+	if key == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.pardoned[key]
+	return ok
 }
 
 // Blocked reports whether ip is currently temp or permanently banned.
@@ -149,7 +168,7 @@ func (s *Store) ObserveInvalid(ip net.IP, reason string) {
 	}
 	s.mu.Lock()
 	now := s.now()
-	if s.blockedLocked(key, now) {
+	if _, ok := s.pardoned[key]; ok || s.blockedLocked(key, now) {
 		s.mu.Unlock()
 		return
 	}
@@ -199,6 +218,10 @@ func (s *Store) BanPermanent(ip net.IP, reason string) {
 		return
 	}
 	s.mu.Lock()
+	if _, ok := s.pardoned[key]; ok {
+		s.mu.Unlock()
+		return
+	}
 	r := s.byIP[key]
 	if r != nil && r.Permanent {
 		s.mu.Unlock()
@@ -254,6 +277,7 @@ func (s *Store) Unban(ip net.IP, actor string) error {
 		return nil
 	}
 	delete(s.byIP, key)
+	s.pardoned[key] = struct{}{}
 	if actor == "" {
 		actor = "unknown"
 	}
@@ -296,6 +320,7 @@ func (s *Store) UnbanCIDRs(cidrs []string, actor string) {
 		for _, n := range nets {
 			if n.Contains(ip) {
 				delete(s.byIP, key)
+				s.pardoned[key] = struct{}{}
 				removed = append(removed, key)
 				break
 			}
@@ -388,6 +413,14 @@ func (s *Store) load() error {
 		return fmt.Errorf("parse %s: %w", s.path, err)
 	}
 	s.byIP = make(map[string]*record)
+	s.pardoned = make(map[string]struct{})
+	for _, ip := range dto.Pardoned {
+		key := ipKey(net.ParseIP(ip))
+		if key == "" {
+			continue
+		}
+		s.pardoned[key] = struct{}{}
+	}
 	for ip, rec := range dto.Records {
 		key := ipKey(net.ParseIP(ip))
 		if key == "" {
@@ -409,6 +442,13 @@ func (s *Store) persistLocked() error {
 			continue
 		}
 		dto.Records[ip] = *r
+	}
+	if len(s.pardoned) > 0 {
+		dto.Pardoned = make([]string, 0, len(s.pardoned))
+		for ip := range s.pardoned {
+			dto.Pardoned = append(dto.Pardoned, ip)
+		}
+		sort.Strings(dto.Pardoned)
 	}
 	body, err := json.MarshalIndent(dto, "", "  ")
 	if err != nil {

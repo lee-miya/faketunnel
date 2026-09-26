@@ -199,6 +199,30 @@ func TestBanPermanent(t *testing.T) {
 	}
 }
 
+func TestUnbanIsNotRebanned(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "denylist.json")
+	s := New(path, nil)
+	ip := net.ParseIP("203.0.113.80")
+	s.BanPermanent(ip, "probe")
+	if err := s.Unban(ip, "ops"); err != nil {
+		t.Fatal(err)
+	}
+	s.BanPermanent(ip, "probe")
+	for i := 0; i < 5; i++ {
+		s.ObserveInvalid(ip, "probe")
+	}
+	if s.Blocked(ip) {
+		t.Fatal("explicit unban was overwritten")
+	}
+	s2 := New(path, nil)
+	s2.BanPermanent(ip, "probe")
+	if s2.Blocked(ip) || !s2.Pardoned(ip) {
+		t.Fatalf("pardon lost on reload blocked=%v pardoned=%v", s2.Blocked(ip), s2.Pardoned(ip))
+	}
+}
+
 func TestBanStoreOnChange(t *testing.T) {
 	t.Parallel()
 	s := New("", nil)
